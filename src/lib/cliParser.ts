@@ -107,10 +107,12 @@ function parseInterfaceRange(device: Device, rangeStr: string): Port[] {
     const parts = rangeStr.split(/,/);
 
     for (const part of parts) {
-        const trimmed = part.trim();
         // Gi1/0/1-4 のような形式を解析
         // 簡易実装: <Prefix><Start>-<End> または <BasePort>-<End>
         // 例: Gi1/0/1-4 -> Gi1/0/1, Gi1/0/2, Gi1/0/3, Gi1/0/4
+        // Ciscoでは "interface range Gi1/0/1 - 4" のようにスペースが入ることもあるため、
+        // ハイフン前後のスペースを削除して正規化する
+        const trimmed = part.trim().replace(/\s*-\s*/g, '-');
 
         // ハイフンがある場合
         if (trimmed.includes('-')) {
