@@ -58,6 +58,31 @@ Next.jsアプリケーションは、Vercelを使うと最も簡単にデプロ�
 2.  ダッシュボードの「Add New...」から「Project」を選択します。
 3.  先ほど作成したGitHubリポジトリ（`network-training-app`）の横にある「Import」をクリックします。
 4.  設定画面が表示されますが、デフォルトのままで「Deploy」をクリックします。
-5.  数分待つとビルドが完了し、公開URL（例: `https://network-training-app.vercel.app`）が発行されます。
+5.  数分待つとビルドが完了し、公開URLが発行されます。
 
-これで、Webブラウザから誰レもアクセスできる状態で公開されます。
+## 6. 公開アプリケーションの更新方法
+
+コードを修正した後は、以下のコマンドを実行することでGitHubに変更をプッシュでき、Vercel側でも自動的に再デプロイ（更新）が行われます。
+
+```bash
+# 変更ファイルをステージング
+git add .
+
+# 変更内容をコミット（メッセージは適宜変更してください）
+git commit -m "Update application"
+
+# GitHubへプッシュ（Vercelへの自動デプロイがトリガーされます）
+git push
+```
+
+## 7. 公開URLの変更 (カスタムドメインの設定)
+
+公開URLを `https://baudroie-network-training-app.vercel.app/` に設定する手順です。
+
+1.  Vercelのダッシュボードで、対象のプロジェクト (`network-training-app`) を開きます。
+2.  上部のタブから **Settings** をクリックします。
+3.  左側メニューの **Domains** を選択します。
+4.  **Domains** 設定画面で、現在のドメインの横にある **Edit** ボタンをクリックします（または Add します）。
+5.  ドメイン名を **`baudroie-network-training-app.vercel.app`** に変更し、保存します。
+
+※ 名前が他ですでに使われている場合はエラーになりますが、その場合は少し違う名前を試してください。

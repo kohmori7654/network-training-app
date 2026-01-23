@@ -468,7 +468,12 @@ export const useNetworkStore = create<NetworkStore>()(
 
             // 状態リセット
             resetState: () => {
-                set(initialState);
+                set({
+                    devices: [],
+                    connections: [],
+                    selectedDeviceId: null,
+                    terminalStates: {},
+                });
             },
 
             // ターミナル状態更新
