@@ -130,7 +130,7 @@ export default function MainLayout() {
                     <Network className="text-blue-400" size={28} />
                     <div>
                         <h1 className="text-lg font-bold text-white">Baudroie Virtual Campus</h1>
-                        <p className="text-xs text-slate-500">ネットワーク知識習得を応援するシミュレーター</p>
+                        <p className="text-xs text-slate-500">※Chrome非推奨(ログ保存不可)、Edge,Firefox推奨</p>
                     </div>
                 </div>
 
