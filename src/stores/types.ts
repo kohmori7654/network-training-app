@@ -101,6 +101,7 @@ export interface BaseDevice {
 export interface L2Switch extends BaseDevice {
   type: 'l2-switch';
   model: 'Catalyst 2960-X';
+  macAddress: string; // Added for Bridge ID
   vlanDb: VlanInfo[];
   macAddressTable: MacEntry[];
   stpState: StpState;
@@ -125,6 +126,7 @@ export interface BgpConfig {
 export interface L3Switch extends BaseDevice {
   type: 'l3-switch';
   model: 'Catalyst 3750-X';
+  macAddress: string; // Added for Bridge ID
   vlanDb: VlanInfo[];
   macAddressTable: MacEntry[];
   stpState: StpState;

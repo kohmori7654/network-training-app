@@ -245,10 +245,187 @@ function formatArpTable(device: L3Switch): string[] {
     return output;
 }
 
+function formatSpanningTree(device: L2Switch | L3Switch): string[] {
+    const output: string[] = [];
+    const stp = device.stpState;
+
+    // VLANごとのSTP情報を表示（PVST+シミュレーション）
+    // vlanDbに含まれるactiveなVLANについて表示
+    const activeVlans = device.vlanDb
+        .filter(v => v.status === 'active')
+        .sort((a, b) => a.id - b.id);
+
+    if (activeVlans.length === 0) {
+        return ['No Spanning Tree instance found.'];
+    }
+
+    // 標準的な値（シミュレーション用）
+    const helloTime = 2;
+    const maxAge = 20;
+    const fwdDelay = 15;
+    const agingTime = 300;
+
+    for (const vlan of activeVlans) {
+        const vlanIdStr = `VLAN${String(vlan.id).padStart(4, '0')}`;
+
+        // Root ID Logic
+        // device.stpState.vlanConfig[vlan.id].rootType === 'primary' なら priority は下がるが、
+        // ここでは簡易的に stpState.priority またはデフォルトを使用
+        // Root Bridge IDの決定は本来ネットワーク全体の最小BridgeIDだが、
+        // シミュレーションでは stpState.rootBridgeId が "そのVLANのルート" を指していると仮定する。
+        // 未設定なら自分をルートとみなすか、適当なIDを表示
+        const rootId = stp.rootBridgeId || device.macAddress; // fallback to self
+        const isRoot = rootId === device.macAddress;
+
+        // Root Priority: 32768 + VLAN ID (default)
+        // もし自分がルートでpriority設定があるならそれを使う
+        let rootPriority = 32768 + vlan.id;
+        if (isRoot && stp.vlanConfig && stp.vlanConfig[vlan.id]) {
+            rootPriority = stp.vlanConfig[vlan.id].priority;
+        }
+        // 相手がルートの場合、相手のPriorityを知る術が stpState にないため、
+        // 一般的なデフォルト 32769 (32768+1) や、rootBridgeIdから推測はできない。
+        // ここでは見栄えのため 32769 (default priority + sys-id-ext 1? no, vlan id)
+        // Cisco default: 32768 + VlanID. So Vlan1 -> 32769.
+        if (!isRoot) {
+            // 他人がルートの場合のPriorityは不明だが、32769としておく
+            rootPriority = 32768 + vlan.id;
+        }
+
+
+        // Bridge ID (My ID) Logic
+        let myPriority = 32768 + vlan.id;
+        if (stp.vlanConfig && stp.vlanConfig[vlan.id]) {
+            myPriority = stp.vlanConfig[vlan.id].priority;
+        }
+
+        output.push(vlanIdStr);
+        output.push(`  Spanning tree enabled protocol ieee`);
+        output.push(`  Root ID    Priority    ${rootPriority}`);
+        output.push(`             Address     ${rootId}`);
+        if (isRoot) {
+            output.push(`             This bridge is the root`);
+        }
+        output.push(`             Hello Time   ${helloTime} sec  Max Age ${maxAge} sec  Forward Delay ${fwdDelay} sec`);
+        output.push('');
+        output.push(`  Bridge ID  Priority    ${myPriority}  (priority ${myPriority - vlan.id} sys-id-ext ${vlan.id})`);
+        output.push(`             Address     ${device.macAddress}`);
+        output.push(`             Hello Time   ${helloTime} sec  Max Age ${maxAge} sec  Forward Delay ${fwdDelay} sec`);
+        output.push(`             Aging Time  ${agingTime} sec`);
+        output.push('');
+        output.push(`    Interface        Role Sts Cost      Prio.Nbr Type`);
+        output.push(`    ---------------- ---- --- --------- -------- --------------------------------`);
+
+        // Interfaces for this VLAN
+        // Access ports in this VLAN + Trunk ports (allowing this VLAN)
+        const vlanPorts = device.ports.filter(p => {
+            if (p.status !== 'up') return false;
+            if (p.mode === 'access' && p.vlan === vlan.id) return true;
+            if (p.mode === 'trunk') {
+                // Check allowed vlans
+                if (!p.trunkAllowedVlans) return true; // all allowed
+                return p.trunkAllowedVlans.includes(vlan.id);
+            }
+            return false;
+        });
+
+        // ソート: Gi0/1, Gi0/2...
+        vlanPorts.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+
+        for (const port of vlanPorts) {
+            const name = port.name.padEnd(16);
+
+            // Port State from stpState
+            // stpState.portStates key is portId
+            const stpPortState = stp.portStates[port.id] || 'forwarding'; // Default FWD
+
+            let role = 'Desg';
+            let status = 'FWD';
+
+            if (stpPortState === 'blocking') {
+                role = 'Altn';
+                status = 'BLK';
+            } else if (stpPortState === 'learning') {
+                role = 'Desg'; // or ???
+                status = 'LRN';
+            } else if (stpPortState === 'listening') {
+                role = 'Desg';
+                status = 'LIS'; // Cisco uses LIS? Usually LRN/BLK/FWD seen mostly. 
+            } else if (stpPortState === 'disabled') {
+                // usually not shown if link down, but if up and stp disabled?
+                role = 'Dsbl';
+                status = 'FWD';
+            }
+
+            // Root Port Logic:
+            // 簡易判定: 自分がルートでなければ、ルートへのパスを持つポートがRoot Port
+            // シミュレーションデータに "rootPortId" がないため、推測する。
+            // Blockでないポートのうち、uplinkっぽいものをRootにする... は難しい。
+            // ここでは "Root Bridge ID" と繋がっているポート、あるいは適当なルールが必要。
+            // もし stpState に rootPort の情報があればベストだが、ない。
+            // 暫定: forwardingのポートのうち、最初の1つをRoot Portと表示する（自分がルートでない場合）
+            // *修正*: stpStateの定義を拡張できないので、Altn(Blocking)以外で、かつ非ルートブリッジなら
+            // 1つはRoot Portがあるはず。
+            // 完全に正しく表示するにはバックエンドのSTP計算ロジックからの情報が必要。
+            // 今回は表示の実装なので、役割はモック化せざるを得ない場合がある。
+
+            // 簡易ロジック:
+            // 自分がルート -> 全て Desg
+            if (isRoot) {
+                role = 'Desg';
+            } else {
+                // ルートでない
+                if (status === 'BLK') {
+                    role = 'Altn';
+                } else {
+                    // FWDのポート。
+                    // ここでどれがRootでどれがDesgか判別不能。
+                    // とりあえず "Desg" にしておく。(Root Port判定は複雑なため)
+                    // もし connectedTo の先が Root Bridge ID と一致すれば Root Port の可能性大だが...
+                }
+            }
+
+            // Cost
+            // 10Mbps=100, 100Mbps=19, 1Gbps=4, 10Gbps=2
+            let cost = 4; // Default 1G
+            if (port.speed === '100Mbps') cost = 19;
+            if (port.speed === '10Mbps') cost = 100;
+            if (port.speed === '10Gbps') cost = 2;
+            const costStr = String(cost).padEnd(9);
+
+            // Prio.Nbr
+            // Cisco: 128.PortNumber
+            // Port IDから番号を抽出してみる "Gi0/1" -> 1
+            const match = port.name.match(/(\d+)$/);
+            const portNum = match ? parseInt(match[1]) : 0;
+            const prioNbr = `128.${portNum}`.padEnd(8);
+
+            const type = 'P2p'; // Shared or P2p. Link is full duplex -> P2p.
+
+            output.push(`    ${name} ${role} ${status} ${costStr} ${prioNbr} ${type}`);
+        }
+        output.push('');
+    }
+
+    return output;
+}
+
 // ========== コマンドハンドラー ==========
 
 const commands: CommandDefinition[] = [
     // ===== モード遷移 =====
+    {
+        pattern: /^show\s+spanning-tree$/i,
+        modes: ['user', 'privileged', 'global-config'], // 通常showはどこでも打てる(do show...)、ここでは主要モードで許可
+        help: 'show spanning-tree - Show spanning tree information',
+        handler: (_, context) => {
+            const sw = getSwitch(context.device);
+            if (!sw) {
+                return { output: ['% This command is supported only on switches'] };
+            }
+            return { output: formatSpanningTree(sw) };
+        }
+    },
     {
         pattern: /^enable$/i,
         modes: ['user'],
@@ -968,11 +1145,11 @@ const commands: CommandDefinition[] = [
                 output.push(`VLAN${String(vid).padStart(4, '0')}`);
                 output.push(`  Spanning tree enabled protocol ieee`);
                 output.push(`  Root ID    Priority    ${pri}`);
-                output.push(`             Address     ${sw.id} (This bridge) ${rootType}`);
+                output.push(`             Address     ${sw.macAddress} (This bridge) ${rootType}`);
                 output.push(`             Hello Time   2 sec  Max Age 20 sec  Forward Delay 15 sec`);
                 output.push('');
                 output.push(`  Bridge ID  Priority    ${pri} (priority ${pri} sys-id-ext ${vid})`);
-                output.push(`             Address     ${sw.id}`);
+                output.push(`             Address     ${sw.macAddress}`);
                 output.push('');
                 output.push('Interface           Role Sts Cost      Prio.Nbr Type');
                 output.push('------------------- ---- --- --------- -------- --------------------------------');
@@ -1187,7 +1364,6 @@ const commands: CommandDefinition[] = [
             if (!sw) return { output: ['% Not supported'] };
 
             const isL3 = context.device.type === 'l3-switch';
-            const model = isL3 ? 'C3750X' : 'C2960X';
             const timestamp = new Date().toLocaleString('en-US', {
                 weekday: 'short', month: 'short', day: 'numeric',
                 hour: '2-digit', minute: '2-digit', second: '2-digit', year: 'numeric'
@@ -1216,26 +1392,30 @@ const commands: CommandDefinition[] = [
                 '!',
             ];
 
-            // L3スイッチ固有の設定
+            // Global L3 settings
             if (isL3) {
                 config.push('ip routing');
                 config.push('!');
                 config.push('ip cef');
                 config.push('!');
             }
-
             config.push('no ip domain-lookup');
             config.push('!');
 
-            // STP設定
+            // Global STP
             config.push(`spanning-tree mode ${sw.stpState.mode}`);
             config.push('spanning-tree extend system-id');
             if (sw.stpState.priority !== 32768) {
                 config.push(`spanning-tree vlan 1-4094 priority ${sw.stpState.priority}`);
             }
+            if (sw.stpState.vlanConfig) {
+                for (const [vid, conf] of Object.entries(sw.stpState.vlanConfig)) {
+                    config.push(`spanning-tree vlan ${vid} priority ${conf.priority}`);
+                }
+            }
             config.push('!');
 
-            // VLAN設定
+            // VLAN Database
             for (const vlan of sw.vlanDb) {
                 config.push(`vlan ${vlan.id}`);
                 config.push(` name ${vlan.name}`);
@@ -1245,57 +1425,118 @@ const commands: CommandDefinition[] = [
             }
             config.push('!');
 
-            // インターフェース設定
-            for (const port of sw.ports) {
+            // Interfaces (Physical & SVIs from ports)
+            // Sort ports: SVIs last, or by name.
+            // Helper to sort: Gi < Te < Po < Vlan
+            const sortPorts = (a: any, b: any) => {
+                const typeScore = (name: string) => {
+                    if (name.startsWith('Fast')) return 1;
+                    if (name.startsWith('Gig')) return 2;
+                    if (name.startsWith('Ten')) return 3;
+                    if (name.startsWith('Port')) return 4;
+                    if (name.startsWith('Vlan')) return 5;
+                    return 0;
+                };
+                const ta = typeScore(a.name);
+                const tb = typeScore(b.name);
+                if (ta !== tb) return ta - tb;
+                return a.name.localeCompare(b.name, undefined, { numeric: true });
+            };
+
+            const sortedPorts = [...sw.ports].sort(sortPorts);
+
+            for (const port of sortedPorts) {
                 config.push(`interface ${port.name}`);
 
                 if (port.status === 'admin-down') {
                     config.push(' shutdown');
                 }
 
-                if (port.vlan && port.vlan !== 1) {
-                    config.push(' switchport mode access');
-                    config.push(` switchport access vlan ${port.vlan}`);
-                } else {
-                    config.push(' switchport mode access');
-                    config.push(' switchport access vlan 1');
-                }
+                const isSvi = port.name.toLowerCase().startsWith('vlan');
 
-                config.push(' spanning-tree portfast');
-                config.push('!');
-            }
-
-            // L3スイッチのSVI設定
-            if (isL3) {
-                const l3 = sw as L3Switch;
-                config.push('interface Vlan1');
-                config.push(' ip address 192.168.1.1 255.255.255.0');
-                config.push(' no shutdown');
-                config.push('!');
-
-                // HSRPグループ設定
-                for (const hsrp of l3.hsrpGroups) {
-                    config.push(`interface Vlan1`);
-                    config.push(` standby ${hsrp.group} ip ${hsrp.virtualIp}`);
-                    config.push(` standby ${hsrp.group} priority ${hsrp.priority}`);
-                    if (hsrp.preempt) {
-                        config.push(` standby ${hsrp.group} preempt`);
+                if (isSvi) {
+                    if (port.ipAddress) {
+                        config.push(` ip address ${port.ipAddress} ${port.subnetMask}`);
+                    } else if (!isL3 && (sw as L2Switch).ipDefaultGateway && port.name === 'Vlan1') {
+                        // On L2, if Vlan1 has no specific IP but potentially could. 
+                        // Usually L2 SVI IP is set on Vlan1.
+                        config.push(' no ip address');
+                    } else {
+                        config.push(' no ip address');
                     }
-                    config.push('!');
-                }
 
-                // ルーティング設定
-                if (l3.routingTable.length > 0) {
-                    for (const route of l3.routingTable) {
-                        if (route.protocol === 'static') {
-                            config.push(`ip route ${route.network} ${route.mask} ${route.nextHop}`);
+                    // HSRP for L3
+                    if (isL3) {
+                        const l3 = sw as L3Switch;
+                        const vid = parseInt(port.name.replace(/\D/g, ''));
+                        const hsrp = l3.hsrpGroups.filter(g => g.group === vid);
+                        for (const h of hsrp) {
+                            config.push(` standby ${h.group} ip ${h.virtualIp}`);
+                            if (h.priority !== 100) config.push(` standby ${h.group} priority ${h.priority}`);
+                            if (h.preempt) config.push(` standby ${h.group} preempt`);
                         }
                     }
+
+                } else {
+                    // Physical / EtherChannel
+                    if (port.mode === 'routed') {
+                        config.push(' no switchport');
+                        if (port.ipAddress) {
+                            config.push(` ip address ${port.ipAddress} ${port.subnetMask}`);
+                        }
+                    } else if (port.mode === 'trunk') {
+                        config.push(' switchport trunk encapsulation dot1q');
+                        config.push(' switchport mode trunk');
+                        if (port.trunkAllowedVlans && port.trunkAllowedVlans.length > 0) {
+                            config.push(` switchport trunk allowed vlan ${port.trunkAllowedVlans.join(',')}`);
+                        }
+                    } else if (port.mode === 'access') {
+                        config.push(' switchport mode access');
+                        if (port.vlan && port.vlan !== 1) {
+                            config.push(` switchport access vlan ${port.vlan}`);
+                        }
+                    }
+                    // Channel Group
+                    if (port.channelGroup) {
+                        config.push(` channel-group ${port.channelGroup} mode active`);
+                    }
+                    // Portfast (simulated default for all access ports in this sim?)
+                    config.push(' spanning-tree portfast');
+                }
+                config.push('!');
+            }
+
+            // Default Gateway (L2)
+            if (!isL3 && (sw as L2Switch).ipDefaultGateway) {
+                config.push(`ip default-gateway ${(sw as L2Switch).ipDefaultGateway}`);
+            }
+
+            // Routing (L3)
+            if (isL3) {
+                const l3 = sw as L3Switch;
+                if (l3.routingTable.length > 0) {
+                    // Static routes
+                    const staticRoutes = l3.routingTable.filter(r => r.protocol === 'static');
+                    if (staticRoutes.length > 0) {
+                        for (const route of staticRoutes) {
+                            config.push(`ip route ${route.network} ${route.mask} ${route.nextHop}`);
+                        }
+                        config.push('!');
+                    }
+                }
+
+                // OSPF / BGP Config stubs (if they existed in types, we'd add them here)
+                if (l3.ospfConfig) {
+                    config.push(`router ospf ${l3.ospfConfig.processId}`);
+                    // router-id is not currently in type definition
+                    for (const net of l3.ospfConfig.networks) {
+                        config.push(` network ${net.network} ${net.wildcard} area ${net.area}`);
+                    }
                     config.push('!');
                 }
             }
 
-            // コンソール・VTY設定
+            // Console lines
             config.push('line con 0');
             config.push(' logging synchronous');
             config.push(' login');
@@ -1335,36 +1576,61 @@ const commands: CommandDefinition[] = [
         modes: ['privileged', 'global-config'],
         help: 'show ip interface brief - Display interface status',
         handler: (_, context) => {
-            const isL3 = context.device.type === 'l3-switch';
+            const sw = context.device;
             const output: string[] = [
-                '',
                 'Interface              IP-Address      OK? Method Status                Protocol',
             ];
 
-            // 物理インターフェース
-            for (const port of context.device.ports.slice(0, 24)) {
+            // Helper to determine status/protocol (Cisco style logic)
+            // If admin down -> Status: administratively down, Protocol: down
+            // If up (connected) -> Status: up, Protocol: up
+            // If down (not connected) -> Status: down, Protocol: down
+            const getStatusLine = (port: any) => {
                 const name = port.name.padEnd(22);
-                const ip = 'unassigned'.padEnd(15);
-                const ok = 'YES';
-                const method = 'unset '.padEnd(6);
-                const status = port.status === 'up' ? 'up                   ' :
-                    port.status === 'admin-down' ? 'administratively down' : 'down                 ';
-                const protocol = port.status === 'up' ? 'up' : 'down';
-                output.push(`${name} ${ip} ${ok} ${method} ${status} ${protocol}`);
-            }
+                let ip = 'unassigned';
+                let method = 'unset';
 
-            // L3スイッチの場合はSVIを追加
-            if (isL3) {
-                const l3 = context.device as L3Switch;
-                for (const vlan of l3.vlanDb) {
-                    const name = `Vlan${vlan.id}`.padEnd(22);
-                    const ip = vlan.id === 1 ? '192.168.1.1     ' : 'unassigned      ';
-                    const ok = 'YES';
-                    const method = vlan.id === 1 ? 'manual' : 'unset ';
-                    const status = vlan.status === 'active' ? 'up                   ' : 'down                 ';
-                    const protocol = vlan.status === 'active' ? 'up' : 'down';
-                    output.push(`${name} ${ip} ${ok} ${method} ${status} ${protocol}`);
+                if (port.ipAddress) {
+                    ip = port.ipAddress;
+                    method = 'manual';
                 }
+
+                const ok = 'YES';
+
+                let statusStr = 'down';
+                let protoStr = 'down';
+
+                if (port.status === 'admin-down') {
+                    statusStr = 'administratively down';
+                    protoStr = 'down';
+                } else if (port.status === 'up') {
+                    statusStr = 'up';
+                    protoStr = 'up';
+                }
+
+                return `${name} ${ip.padEnd(15)} ${ok} ${method.padEnd(6)} ${statusStr.padEnd(21)} ${protoStr}`;
+            };
+
+            // Sort ports
+            const sortPorts = (a: any, b: any) => {
+                const typeScore = (name: string) => {
+                    if (name.startsWith('Fast')) return 1;
+                    if (name.startsWith('Gig')) return 2;
+                    if (name.startsWith('Ten')) return 3;
+                    if (name.startsWith('Port')) return 4;
+                    if (name.startsWith('Vlan')) return 5;
+                    return 0;
+                };
+                const ta = typeScore(a.name);
+                const tb = typeScore(b.name);
+                if (ta !== tb) return ta - tb;
+                return a.name.localeCompare(b.name, undefined, { numeric: true });
+            };
+
+            const sortedPorts = [...sw.ports].sort(sortPorts);
+
+            for (const port of sortedPorts) {
+                output.push(getStatusLine(port));
             }
 
             return { output };
@@ -1514,7 +1780,7 @@ const commands: CommandDefinition[] = [
                     'The password-recovery mechanism is enabled.',
                     '',
                     '512K bytes of flash-simulated non-volatile configuration memory.',
-                    'Base ethernet MAC Address       : 00:1A:2B:3C:4D:00',
+                    `Base ethernet MAC Address       : ${(context.device as any).macAddress}`,
                     'Motherboard assembly number     : 73-12345-06',
                     'Power supply part number        : 341-0345-02',
                     'Motherboard serial number       : FOC12345678',
@@ -2248,8 +2514,7 @@ export function getCommandCompletions(partialInput: string, mode: CliMode): stri
             'exit': null,
             'ip': ['routing', 'route'],
             'spanning-tree': ['mode', 'vlan'],
-            'line': ['con', 'vty'],
-            'show': ['running-config', 'version', 'vlan', 'interfaces', 'ip', 'mac', 'standby'],
+            'show': ['running-config', 'version', 'vlan', 'interfaces', 'ip', 'mac', 'standby', 'spanning-tree'],
         },
         'interface-config': {
             'switchport': ['mode', 'access'],
