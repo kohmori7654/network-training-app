@@ -541,7 +541,7 @@ const commands: CommandDefinition[] = [
         },
     },
     {
-        pattern: /^int(?:erface)?\s+(.+)$/i,
+        pattern: /^int(?:erfaces?)?\s+(.+)$/i,
         modes: ['global-config'],
         help: 'interface <name> - Enter interface configuration mode',
         handler: (args, context) => {
@@ -702,6 +702,29 @@ const commands: CommandDefinition[] = [
         }
     },
     {
+        pattern: /^no\s+channel-group$/i,
+        modes: ['interface-config'],
+        help: 'no channel-group - Remove interface from EtherChannel',
+        handler: (_, context) => {
+            const targetPortIds = context.selectedPortIds || (context.currentInterface ? [findPort(context.device, context.currentInterface)?.id].filter(id => id) as string[] : []);
+            if (targetPortIds.length === 0) return { output: ['% No interface selected'] };
+
+            const sw = getSwitch(context.device);
+            if (!sw) return { output: ['% Invalid device'] };
+
+            const updatedPorts = sw.ports.map(p => {
+                if (targetPortIds.includes(p.id)) {
+                    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                    const { channelGroup, ...rest } = p;
+                    return rest;
+                }
+                return p;
+            });
+
+            return { output: [], updateConfig: { ports: updatedPorts } };
+        },
+    },
+    {
         pattern: /^shutdown$/i,
         modes: ['interface-config'],
         help: 'shutdown - Disable interface',
@@ -812,6 +835,27 @@ const commands: CommandDefinition[] = [
         },
     },
     {
+        pattern: /^no\s+description$/i,
+        modes: ['interface-config'],
+        help: 'no description - Remove interface description',
+        handler: (_, context) => {
+            const targetPortIds = context.selectedPortIds || (context.currentInterface ? [findPort(context.device, context.currentInterface)?.id].filter(id => id) as string[] : []);
+            if (targetPortIds.length === 0) return { output: ['% No interface selected'] };
+
+            const sw = context.device;
+            const updatedPorts = sw.ports.map(p => {
+                if (targetPortIds.includes(p.id)) {
+                    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                    const { description, ...rest } = p;
+                    return rest;
+                }
+                return p;
+            });
+
+            return { output: [], updateConfig: { ports: updatedPorts } };
+        },
+    },
+    {
         pattern: /^switchport\s+trunk\s+allowed\s+vlan\s+(.+)$/i,
         modes: ['interface-config'],
         help: 'switchport trunk allowed vlan ...',
@@ -846,6 +890,24 @@ const commands: CommandDefinition[] = [
 
             const updatedPorts = sw.ports.map(p =>
                 targetPortIds.includes(p.id) ? { ...p, trunkAllowedVlans: newAllowed } : p
+            );
+
+            return { output: [], updateConfig: { ports: updatedPorts } };
+        },
+    },
+    {
+        pattern: /^no\s+switchport\s+trunk\s+allowed\s+vlan$/i,
+        modes: ['interface-config'],
+        help: 'no switchport trunk allowed vlan - Reset allowed VLANs to default (all)',
+        handler: (_, context) => {
+            const targetPortIds = context.selectedPortIds || (context.currentInterface ? [findPort(context.device, context.currentInterface)?.id].filter(id => id) as string[] : []);
+            if (targetPortIds.length === 0) return { output: ['% No interface selected'] };
+
+            const sw = getSwitch(context.device);
+            if (!sw) return { output: ['% Invalid device'] };
+
+            const updatedPorts = sw.ports.map(p =>
+                targetPortIds.includes(p.id) ? { ...p, trunkAllowedVlans: undefined } : p
             );
 
             return { output: [], updateConfig: { ports: updatedPorts } };
@@ -925,6 +987,49 @@ const commands: CommandDefinition[] = [
             }
 
             return { output: ['% Invalid interface for IP address'] };
+        }
+    },
+    {
+        pattern: /^no\s+ip\s+address$/i,
+        modes: ['interface-config'],
+        help: 'no ip address - Remove IP address',
+        handler: (_, context) => {
+            const targetPortIds = context.selectedPortIds || (context.currentInterface ? [findPort(context.device, context.currentInterface)?.id].filter(id => id) as string[] : []);
+
+            // Handle SVI
+            if (context.currentInterface?.toLowerCase().startsWith('vlan')) {
+                const sw = context.device;
+                if (getSwitch(sw)) {
+                    const sviPort = sw.ports.find(p => p.name.toLowerCase() === context.currentInterface?.toLowerCase());
+                    if (sviPort) {
+                        const updatedPorts = sw.ports.map(p => {
+                            if (p.id === sviPort.id) {
+                                // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                                const { ipAddress, subnetMask, ...rest } = p;
+                                return rest;
+                            }
+                            return p;
+                        });
+                        return { output: [], updateConfig: { ports: updatedPorts } };
+                    }
+                }
+            }
+
+            // Routed Port
+            if (targetPortIds.length > 0) {
+                const sw = context.device;
+                const updatedPorts = sw.ports.map(p => {
+                    if (targetPortIds.includes(p.id)) {
+                        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                        const { ipAddress, subnetMask, ...rest } = p;
+                        return rest;
+                    }
+                    return p;
+                });
+                return { output: [], updateConfig: { ports: updatedPorts } };
+            }
+
+            return { output: ['% Invalid interface'] };
         }
     },
 
@@ -1341,6 +1446,49 @@ const commands: CommandDefinition[] = [
         },
     },
     {
+        pattern: /^no\s+ip\s+route\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)$/i,
+        modes: ['global-config'],
+        help: 'no ip route <network> <mask> <next-hop> - Remove static route',
+        handler: (args, context) => {
+            if (context.device.type !== 'l3-switch') {
+                return { output: ['% IP routing not supported on this device'] };
+            }
+            const [network, mask, nextHop] = args;
+            const l3 = context.device as L3Switch;
+
+            const newRoutingTable = l3.routingTable.filter(r =>
+                !(r.network === network && r.mask === mask && r.nextHop === nextHop)
+            );
+
+            return {
+                output: [],
+                updateConfig: {
+                    routingTable: newRoutingTable,
+                },
+            };
+        },
+    },
+    {
+        pattern: /^no\s+router\s+ospf\s+(\d+)$/i,
+        modes: ['global-config'],
+        help: 'no router ospf <process-id> - Remove OSPF process',
+        handler: (args, context) => {
+            if (context.device.type !== 'l3-switch') {
+                return { output: ['% IP routing not supported on this device'] };
+            }
+            const processId = parseInt(args[0]);
+            const l3 = context.device as L3Switch;
+
+            if (l3.ospfConfig?.processId === processId) {
+                return {
+                    output: [],
+                    updateConfig: { ospfConfig: undefined } as any // Type assertion needed or update types
+                };
+            }
+            return { output: ['% OSPF process not found'] };
+        },
+    },
+    {
         pattern: /^ip\s+address\s+(\d+\.\d+\.\d+\.\d+)\s+(\d+\.\d+\.\d+\.\d+)$/i,
         modes: ['interface-config'],
         help: 'ip address <ip> <mask> - Set interface IP address',
@@ -1356,7 +1504,7 @@ const commands: CommandDefinition[] = [
 
     // ===== showコマンド =====
     {
-        pattern: /^sh(?:ow)?\s+run(?:ning-config)?$/i,
+        pattern: /^sh(?:ow)?\s+ru(?:n(?:ning-config)?)?$/i,
         modes: ['privileged', 'global-config', 'interface-config', 'vlan-config'],
         help: 'show running-config - Display current configuration',
         handler: (_, context) => {
@@ -1564,7 +1712,7 @@ const commands: CommandDefinition[] = [
         },
     },
     {
-        pattern: /^sh(?:ow)?\s+int(?:erface)?\s+desc(?:ription)?$/i,
+        pattern: /^sh(?:ow)?\s+int(?:erfaces?)?\s+d(?:es(?:c(?:ription)?)?)?$/i,
         modes: ['privileged', 'global-config'],
         help: 'show interfaces description - Display interface description',
         handler: (_, context) => {
@@ -1994,6 +2142,24 @@ const commands: CommandDefinition[] = [
         },
     },
     {
+        pattern: /^no\s+standby\s+(\d+)\s+ip(?:\s+(\d+\.\d+\.\d+\.\d+))?$/i,
+        modes: ['interface-config'],
+        help: 'no standby <group> ip - Remove HSRP group IP',
+        handler: (args, context) => {
+            if (context.device.type !== 'l3-switch') return { output: ['% HSRP not supported on this device'] };
+            const group = parseInt(args[0]);
+            const l3 = context.device as L3Switch;
+
+            // In our simulation, removing IP effectively deletes the group config
+            const hsrpGroups = l3.hsrpGroups.filter(h => h.group !== group);
+
+            return {
+                output: [],
+                updateConfig: { hsrpGroups },
+            };
+        },
+    },
+    {
         pattern: /^standby\s+(\d+)\s+priority\s+(\d+)$/i,
         modes: ['interface-config'],
         help: 'standby <group> priority <value> - Set HSRP priority (1-255)',
@@ -2017,6 +2183,27 @@ const commands: CommandDefinition[] = [
             if (!hsrpGroups.find(h => h.group === group)) {
                 return { output: [`% HSRP group ${group} not configured`] };
             }
+
+            return {
+                output: [],
+                updateConfig: { hsrpGroups },
+            };
+        },
+    },
+    {
+        pattern: /^no\s+standby\s+(\d+)\s+priority$/i,
+        modes: ['interface-config'],
+        help: 'no standby <group> priority - Reset HSRP priority to default (100)',
+        handler: (args, context) => {
+            if (context.device.type !== 'l3-switch') return { output: ['% HSRP not supported on this device'] };
+            const group = parseInt(args[0]);
+            const l3 = context.device as L3Switch;
+
+            const existingIdx = l3.hsrpGroups.findIndex(g => g.group === group);
+            if (existingIdx === -1) return { output: ['% HSRP group not found'] };
+
+            const hsrpGroups = [...l3.hsrpGroups];
+            hsrpGroups[existingIdx] = { ...hsrpGroups[existingIdx], priority: 100 };
 
             return {
                 output: [],
