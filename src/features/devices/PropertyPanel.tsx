@@ -90,28 +90,43 @@ export default function PropertyPanel() {
                 {/* 接続済みポート一覧（切断ボタン付き） */}
                 <div className="max-h-40 overflow-y-auto space-y-1 mb-2">
                     {connectedPorts.length > 0 ? (
-                        connectedPorts.map((port) => (
-                            <div
-                                key={port.id}
-                                className="flex items-center justify-between px-2 py-1 bg-slate-800 rounded text-xs group"
-                            >
-                                <div className="flex items-center gap-2">
-                                    <span className={`w-2 h-2 rounded-full ${port.status === 'up' ? 'bg-green-400' : 'bg-red-400'}`} />
-                                    <span className="text-slate-300">{port.name}</span>
-                                </div>
-                                <button
-                                    onClick={() => {
-                                        if (confirm(`${port.name} の接続を切断しますか？`)) {
-                                            disconnectPort(selectedDevice.id, port.id);
-                                        }
-                                    }}
-                                    className="p-1 text-slate-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
-                                    title="接続を切断"
+                        connectedPorts.map((port) => {
+                            // 接続先デバイスとポートを特定する
+                            const targetDevice = devices.find((d) => d.ports.some((p) => p.id === port.connectedTo));
+                            const targetPort = targetDevice?.ports.find((p) => p.id === port.connectedTo);
+
+                            return (
+                                <div
+                                    key={port.id}
+                                    className="flex items-center justify-between px-2 py-1 bg-slate-800 rounded text-xs group"
                                 >
-                                    <Trash2 size={12} />
-                                </button>
-                            </div>
-                        ))
+                                    <div className="flex flex-col gap-0.5">
+                                        <div className="flex items-center gap-2">
+                                            <span className={`w-2 h-2 rounded-full ${port.status === 'up' ? 'bg-green-400' : 'bg-red-400'}`} />
+                                            <span className="text-slate-300 font-medium">{port.name}</span>
+                                        </div>
+                                        {targetDevice && targetPort && (
+                                            <div className="pl-4 text-[10px] text-slate-500 flex items-center gap-1">
+                                                <span>→</span>
+                                                <span className="text-slate-400">{targetDevice.hostname}</span>
+                                                <span className="text-slate-600">({targetPort.name})</span>
+                                            </div>
+                                        )}
+                                    </div>
+                                    <button
+                                        onClick={() => {
+                                            if (confirm(`${port.name} の接続を切断しますか？`)) {
+                                                disconnectPort(selectedDevice.id, port.id);
+                                            }
+                                        }}
+                                        className="p-1 text-slate-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
+                                        title="接続を切断"
+                                    >
+                                        <Trash2 size={12} />
+                                    </button>
+                                </div>
+                            );
+                        })
                     ) : (
                         <p className="text-xs text-slate-500">接続されているポートはありません</p>
                     )}
