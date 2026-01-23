@@ -1,7 +1,7 @@
 'use client';
 
 import React from 'react';
-import { Monitor, Server, Layers } from 'lucide-react';
+import { Monitor, Server, Layers, MessageSquare } from 'lucide-react';
 
 interface DevicePaletteItemProps {
     type: string;
@@ -59,6 +59,16 @@ export default function DevicePalette() {
             />
 
             <div className="mt-auto">
+                <a
+                    href="https://docs.google.com/forms/d/e/1FAIpQLScT4ACzc0oRbFXxloKq49WZVOA5TEFi5a_uSQ9i4zlaqCDk4w/viewform?usp=header"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="flex items-center justify-center gap-2 w-full p-2 mb-4 bg-blue-600 hover:bg-blue-700 text-white text-xs font-bold rounded transition-colors shadow-md"
+                >
+                    <MessageSquare size={16} />
+                    <span>コンタクト/バグ報告</span>
+                </a>
+
                 <div className="text-xs text-slate-500 border-t border-slate-700 pt-4">
                     <p className="mb-1">💡 ヒント:</p>
                     <ul className="list-disc list-inside space-y-1">
