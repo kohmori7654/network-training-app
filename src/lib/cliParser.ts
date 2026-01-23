@@ -189,6 +189,23 @@ function formatInterfaceBrief(device: Device): string[] {
     return output;
 }
 
+function formatInterfaceDescription(device: Device): string[] {
+    const output = [
+        '',
+        'Interface                      Status         Protocol Description',
+    ];
+
+    for (const port of device.ports) {
+        const name = port.name.padEnd(31);
+        const status = (port.status === 'up' ? 'up' : port.status === 'admin-down' ? 'admin down' : 'down').padEnd(15);
+        const protocol = (port.status === 'up' ? 'up' : 'down').padEnd(9);
+        const description = port.description || '';
+        output.push(`${name}${status}${protocol}${description}`);
+    }
+
+    return output;
+}
+
 function formatMacAddressTable(device: L2Switch | L3Switch): string[] {
     const output = [
         '',
@@ -595,6 +612,23 @@ const commands: CommandDefinition[] = [
 
             const updatedPorts = sw.ports.map(p =>
                 targetPortIds.includes(p.id) ? { ...p, mode: 'access' as const, ipAddress: undefined, subnetMask: undefined } : p
+            );
+
+            return { output: [], updateConfig: { ports: updatedPorts } };
+        },
+    },
+    {
+        pattern: /^description\s+(.+)$/i,
+        modes: ['interface-config'],
+        help: 'description <text> - Set interface description',
+        handler: (args, context) => {
+            const description = args[0];
+            const targetPortIds = context.selectedPortIds || (context.currentInterface ? [findPort(context.device, context.currentInterface)?.id].filter(id => id) as string[] : []);
+            if (targetPortIds.length === 0) return { output: ['% No interface selected'] };
+
+            const sw = context.device;
+            const updatedPorts = sw.ports.map(p =>
+                targetPortIds.includes(p.id) ? { ...p, description } : p
             );
 
             return { output: [], updateConfig: { ports: updatedPorts } };
@@ -1286,6 +1320,14 @@ const commands: CommandDefinition[] = [
             if (!sw) return { output: ['% VLANs not supported'] };
 
             return { output: formatVlanTable(sw.vlanDb) };
+        },
+    },
+    {
+        pattern: /^sh(?:ow)?\s+int(?:erface)?\s+desc(?:ription)?$/i,
+        modes: ['privileged', 'global-config'],
+        help: 'show interfaces description - Display interface description',
+        handler: (_, context) => {
+            return { output: formatInterfaceDescription(context.device) };
         },
     },
     {

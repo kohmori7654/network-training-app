@@ -24,6 +24,7 @@ export interface Port {
   // Routed Port fields
   ipAddress?: string;
   subnetMask?: string;
+  description?: string;
 }
 
 export interface EtherChannel {
