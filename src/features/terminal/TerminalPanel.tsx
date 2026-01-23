@@ -242,7 +242,23 @@ export default function TerminalPanel({ deviceId, isFullScreen = false, onToggle
             const completions = getCommandCompletions(currentInput, cliState.mode);
             if (completions.length === 1) {
                 // 一意に確定できる場合は補完
-                setCurrentInput(completions[0] + ' ');
+                const completion = completions[0];
+                const lastSpaceIndex = currentInput.lastIndexOf(' ');
+
+                if (lastSpaceIndex === -1) {
+                    // 1単語目 (例: "en" -> "enable")
+                    setCurrentInput(completion + ' ');
+                } else {
+                    // 2単語目以降 (例: "show int" -> "show interfaces")
+                    // 入力末尾がスペースでない場合、最後の単語を置換
+                    if (!currentInput.endsWith(' ')) {
+                        const prefix = currentInput.substring(0, lastSpaceIndex + 1);
+                        setCurrentInput(prefix + completion + ' ');
+                    } else {
+                        // スペースで終わっている場合は追記
+                        setCurrentInput(currentInput + completion + ' ');
+                    }
+                }
             } else if (completions.length > 1) {
                 // 複数候補がある場合は表示
                 const prompt = getPrompt();

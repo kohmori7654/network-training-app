@@ -54,6 +54,8 @@ function NetworkCanvasInner() {
         open: boolean;
         sourceDeviceId: string;
         targetDeviceId: string;
+        sourceHandle?: string | null;
+        targetHandle?: string | null;
     }>({ open: false, sourceDeviceId: '', targetDeviceId: '' });
 
     // デバイスをReact Flowノードに変換
@@ -69,6 +71,10 @@ function NetworkCanvasInner() {
         id: conn.id,
         source: conn.sourceDeviceId,
         target: conn.targetDeviceId,
+        sourceHandle: conn.sourceHandle,
+        targetHandle: conn.targetHandle,
+        type: 'smoothstep', // ケーブルが機器の下を通らないように直角ルーティング
+        pathOptions: { borderRadius: 20, offset: 20 },
         animated: conn.status === 'up',
         style: { stroke: conn.status === 'up' ? '#22c55e' : '#ef4444', strokeWidth: 2 },
     }));
@@ -76,14 +82,67 @@ function NetworkCanvasInner() {
     const [nodes, setNodes, onNodesChange] = useNodesState(initialNodes);
     const [edges, setEdges, onEdgesChange] = useEdgesState(initialEdges);
 
+    // ノードの衝突判定（重なり防止）
+    const handleNodesChange = useCallback(
+        (changes: any) => {
+            const NEXT_NODES = [...nodes];
+            // バッファを増やして重なりを厳格に防止
+            const NODE_WIDTH = 220;
+            const NODE_HEIGHT = 160;
+
+            const filteredChanges = changes.map((change: any) => {
+                if (change.type === 'position' && change.position && change.dragging) {
+                    const targetNode = NEXT_NODES.find((n) => n.id === change.id);
+                    if (!targetNode) return change;
+
+                    const newX = change.position.x;
+                    const newY = change.position.y;
+
+                    // 他のノードとの衝突チェック
+                    const hasCollision = NEXT_NODES.some((n) => {
+                        if (n.id === change.id) return false;
+
+                        const dx = Math.abs(newX - n.position.x);
+                        const dy = Math.abs(newY - n.position.y);
+
+                        // 矩形の重なり判定
+                        return dx < NODE_WIDTH && dy < NODE_HEIGHT;
+                    });
+
+                    if (hasCollision) {
+                        return null;
+                    }
+                }
+                return change;
+            }).filter(Boolean);
+
+            onNodesChange(filteredChanges);
+        },
+        [nodes, onNodesChange]
+    );
+
     // ストアの変更を監視してローカルステートを更新
     React.useEffect(() => {
-        const newNodes: Node[] = devices.map((device) => ({
-            id: device.id,
-            type: device.type,
-            position: device.position,
-            data: { device },
-        }));
+        // ... (existing logic) ...
+        // Note: This overrides local state. We need to be careful not to fight with React Flow's internal state during drag.
+        // Currently, store updates happening via onNodeDragStop, so visual drag is local.
+        const newNodes: Node[] = devices.map((device) => {
+            // 既存のノードがあれば、その位置情報を維持するか、ストアの位置を採用するか？
+            // ストアの位置は onNodeDragStop で更新されるため、ドラッグ中はローカルが先行するが、
+            // 他の要因でデバイスが増減した場合は同期が必要。
+            // ここでは単純にマッピングする。
+            return {
+                id: device.id,
+                type: device.type,
+                position: device.position,
+                data: { device },
+            };
+        });
+
+        // deep compare or just set? setNodes handles diffing internally mostly.
+        // However, setting nodes creates a new array reference.
+        // We should check if devices changed meaningfully?
+        // For now, keep it simple.
         setNodes(newNodes);
     }, [devices, setNodes]);
 
@@ -92,6 +151,10 @@ function NetworkCanvasInner() {
             id: conn.id,
             source: conn.sourceDeviceId,
             target: conn.targetDeviceId,
+            sourceHandle: conn.sourceHandle,
+            targetHandle: conn.targetHandle,
+            type: 'smoothstep', // Update here too
+            pathOptions: { borderRadius: 20, offset: 20 },
             animated: conn.status === 'up',
             style: { stroke: conn.status === 'up' ? '#22c55e' : '#ef4444', strokeWidth: 2 },
         }));
@@ -122,6 +185,8 @@ function NetworkCanvasInner() {
                     open: true,
                     sourceDeviceId: params.source,
                     targetDeviceId: params.target,
+                    sourceHandle: params.sourceHandle,
+                    targetHandle: params.targetHandle,
                 });
             }
         },
@@ -135,7 +200,9 @@ function NetworkCanvasInner() {
                 portSelectModal.sourceDeviceId,
                 sourcePortId,
                 portSelectModal.targetDeviceId,
-                targetPortId
+                targetPortId,
+                portSelectModal.sourceHandle || undefined,
+                portSelectModal.targetHandle || undefined
             );
             setPortSelectModal({ open: false, sourceDeviceId: '', targetDeviceId: '' });
         },
@@ -197,7 +264,7 @@ function NetworkCanvasInner() {
             <ReactFlow
                 nodes={nodes}
                 edges={edges}
-                onNodesChange={onNodesChange}
+                onNodesChange={handleNodesChange}
                 onEdgesChange={onEdgesChange}
                 onConnect={onConnect}
                 onNodeDragStop={onNodeDragStop}

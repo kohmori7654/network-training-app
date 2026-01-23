@@ -152,8 +152,10 @@ export type Device = L2Switch | L3Switch | PC;
 export interface Connection {
   id: string;
   sourceDeviceId: string;
+  sourceHandle?: string; // Added: specific handle ID
   sourcePortId: string;
   targetDeviceId: string;
+  targetHandle?: string; // Added: specific handle ID
   targetPortId: string;
   status: 'up' | 'down';
 }
@@ -196,7 +198,7 @@ export interface NetworkActions {
   updatePCConfig: (deviceId: string, config: { hostname: string; ipAddress: string; subnetMask: string; defaultGateway: string }) => void;
 
   // ポート操作
-  connectPorts: (sourceDeviceId: string, sourcePortId: string, targetDeviceId: string, targetPortId: string) => void;
+  connectPorts: (sourceDeviceId: string, sourcePortId: string, targetDeviceId: string, targetPortId: string, sourceHandle?: string, targetHandle?: string) => void;
   disconnectPort: (deviceId: string, portId: string) => void;
 
   // データ永続化

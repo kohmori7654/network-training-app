@@ -378,7 +378,7 @@ export const useNetworkStore = create<NetworkStore>()(
             },
 
             // ポート接続
-            connectPorts: (sourceDeviceId, sourcePortId, targetDeviceId, targetPortId) => {
+            connectPorts: (sourceDeviceId, sourcePortId, targetDeviceId, targetPortId, sourceHandle, targetHandle) => {
                 const connectionId = generateId();
 
                 set((state) => ({
@@ -407,8 +407,10 @@ export const useNetworkStore = create<NetworkStore>()(
                             id: connectionId,
                             sourceDeviceId,
                             sourcePortId,
+                            sourceHandle: sourceHandle || undefined, // Store Handle ID
                             targetDeviceId,
                             targetPortId,
+                            targetHandle: targetHandle || undefined, // Store Handle ID
                             status: 'up',
                         },
                     ],

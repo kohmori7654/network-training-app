@@ -43,7 +43,27 @@ function PCNode({ data, selected }: PCNodeProps) {
             <Handle
                 type="target"
                 position={Position.Top}
+                id="t-top"
                 className="w-3 h-3 bg-orange-500 border-2 border-orange-300"
+            />
+            <Handle
+                type="source"
+                position={Position.Top}
+                id="s-top"
+                className="w-3 h-3 bg-orange-500 border-2 border-orange-300 opacity-0"
+            />
+
+            <Handle
+                type="target"
+                position={Position.Left}
+                id="t-left"
+                className="w-3 h-3 bg-orange-500 border-2 border-orange-300"
+            />
+            <Handle
+                type="source"
+                position={Position.Left}
+                id="s-left"
+                className="w-3 h-3 bg-orange-500 border-2 border-orange-300 opacity-0"
             />
 
             <div className="flex items-center gap-2 mb-2">
@@ -73,7 +93,27 @@ function PCNode({ data, selected }: PCNodeProps) {
             <Handle
                 type="source"
                 position={Position.Bottom}
+                id="s-bottom"
                 className="w-3 h-3 bg-orange-500 border-2 border-orange-300"
+            />
+            <Handle
+                type="target"
+                position={Position.Bottom}
+                id="t-bottom"
+                className="w-3 h-3 bg-orange-500 border-2 border-orange-300 opacity-0"
+            />
+
+            <Handle
+                type="source"
+                position={Position.Right}
+                id="s-right"
+                className="w-3 h-3 bg-orange-500 border-2 border-orange-300"
+            />
+            <Handle
+                type="target"
+                position={Position.Right}
+                id="t-right"
+                className="w-3 h-3 bg-orange-500 border-2 border-orange-300 opacity-0"
             />
         </div>
     );

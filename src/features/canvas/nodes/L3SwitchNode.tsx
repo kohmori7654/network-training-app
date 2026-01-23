@@ -57,7 +57,34 @@ function L3SwitchNode({ data, selected }: L3SwitchNodeProps) {
             <Handle
                 type="target"
                 position={Position.Top}
+                id="t-top"
                 className="w-3 h-3 bg-green-500 border-2 border-green-300"
+            />
+            <Handle
+                type="source"
+                position={Position.Top}
+                id="s-top"
+                className="w-3 h-3 bg-green-500 border-2 border-green-300 pointer-events-none opacity-0" // Overlap, primarily for receiving? No, let's keep separate visuals or logical stack?
+            />
+            {/* Logic: Single handle can be source/target if unstyled? React Flow requires type. 
+               If provided multiple handles on same position, user might grab wrong one. 
+               Better: offset them or just place them close?
+               Actually, for UX, usually 1 handle per side is best. 
+               But type must be fixed. 
+               If I want bidirectional:
+               Use two handles on same position. 
+            */}
+            <Handle
+                type="target"
+                position={Position.Left}
+                id="t-left"
+                className="w-3 h-3 bg-green-500 border-2 border-green-300"
+            />
+            <Handle
+                type="source"
+                position={Position.Left}
+                id="s-left"
+                className="w-3 h-3 bg-green-500 border-2 border-green-300 opacity-0" // Invisible source handle on top
             />
 
             <div className="flex items-center justify-between mb-2">
@@ -99,7 +126,27 @@ function L3SwitchNode({ data, selected }: L3SwitchNodeProps) {
             <Handle
                 type="source"
                 position={Position.Bottom}
+                id="s-bottom"
                 className="w-3 h-3 bg-green-500 border-2 border-green-300"
+            />
+            <Handle
+                type="target"
+                position={Position.Bottom}
+                id="t-bottom"
+                className="w-3 h-3 bg-green-500 border-2 border-green-300 opacity-0"
+            />
+
+            <Handle
+                type="source"
+                position={Position.Right}
+                id="s-right"
+                className="w-3 h-3 bg-green-500 border-2 border-green-300"
+            />
+            <Handle
+                type="target"
+                position={Position.Right}
+                id="t-right"
+                className="w-3 h-3 bg-green-500 border-2 border-green-300 opacity-0"
             />
         </div>
     );
