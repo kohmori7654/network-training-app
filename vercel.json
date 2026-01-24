@@ -1,0 +1,9 @@
+{
+    "redirects": [
+        {
+            "source": "/(.*)",
+            "destination": "https://baudroie-virtual-campus.web.app/$1",
+            "permanent": true
+        }
+    ]
+}

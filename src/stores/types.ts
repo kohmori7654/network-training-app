@@ -6,7 +6,7 @@ export type DeviceType = 'l2-switch' | 'l3-switch' | 'pc';
 
 export type PortStatus = 'up' | 'down' | 'admin-down';
 
-export type CliMode = 'user' | 'privileged' | 'global-config' | 'interface-config' | 'vlan-config' | 'router-ospf-config' | 'router-bgp-config';
+export type CliMode = 'user' | 'privileged' | 'global-config' | 'interface-config' | 'vlan-config' | 'router-ospf-config' | 'router-bgp-config' | 'line-config';
 
 // ========== ポート ==========
 
@@ -82,6 +82,13 @@ export interface VlanInfo {
   status: 'active' | 'suspended';
 }
 
+export interface DeviceSecurity {
+  enableSecret?: string;
+  enablePassword?: string;
+  consolePassword?: string;
+  vtyPassword?: string;
+}
+
 // ========== デバイス定義 ==========
 
 export interface Position {
@@ -96,6 +103,7 @@ export interface BaseDevice {
   hostname: string;
   position: Position;
   ports: Port[];
+  security?: DeviceSecurity;
 }
 
 export interface L2Switch extends BaseDevice {
@@ -108,6 +116,7 @@ export interface L2Switch extends BaseDevice {
   runningConfig: string[];
   etherChannels: EtherChannel[];
   ipDefaultGateway?: string; // Added
+  security: DeviceSecurity; // Added
 }
 
 export interface OspfConfig {
@@ -138,6 +147,7 @@ export interface L3Switch extends BaseDevice {
   // Routing Protocols
   ospfConfig?: OspfConfig;
   bgpConfig?: BgpConfig;
+  security: DeviceSecurity; // Added
 }
 
 export interface PC extends BaseDevice {
@@ -172,6 +182,9 @@ export interface TerminalState {
   currentVlan?: number;
   selectedPortIds?: string[]; // Added: For interface range selection
   commandHistory: string[];
+  // Authentication State
+  authStage?: 'none' | 'login' | 'enable'; // 'login' = console/vty, 'enable' = enable mode
+  isConsoleAuthenticated?: boolean; // For tracking initial login
 }
 
 export interface NetworkState {
@@ -212,6 +225,9 @@ export interface NetworkActions {
   // ターミナル状態管理
   updateTerminalState: (deviceId: string, state: Partial<TerminalState>) => void;
   getTerminalState: (deviceId: string) => TerminalState | undefined;
+
+  // STP状態管理 (内部/デバッグ用)
+  setPortStpState: (deviceId: string, portId: string, state: 'blocking' | 'learning' | 'forwarding') => void;
 }
 
 export type NetworkStore = NetworkState & NetworkActions;

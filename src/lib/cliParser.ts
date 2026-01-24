@@ -472,6 +472,7 @@ const commands: CommandDefinition[] = [
                 'vlan-config': 'global-config',
                 'router-ospf-config': 'global-config',
                 'router-bgp-config': 'global-config',
+                'line-config': 'global-config',
             };
             return { output: [], newMode: modeTransitions[context.mode] };
         },
@@ -2476,6 +2477,69 @@ const commands: CommandDefinition[] = [
     },
 
     // ===== Routing Protocols (OSPF/BGP) =====
+    // ===== Password / Line Configuration =====
+    {
+        pattern: /^enable\s+(secret|password)\s+(.+)$/i,
+        modes: ['global-config'],
+        help: 'enable secret|password <password> - Set enable password',
+        handler: (args, context) => {
+            const type = args[0].toLowerCase();
+            const password = args[1];
+
+            return {
+                output: [],
+                updateConfig: {
+                    security: {
+                        ...context.device.security,
+                        [type === 'secret' ? 'enableSecret' : 'enablePassword']: password
+                    }
+                }
+            };
+        }
+    },
+    {
+        pattern: /^line\s+console\s+0$/i,
+        modes: ['global-config'],
+        help: 'line console 0 - Enter console line configuration mode',
+        handler: () => ({
+            output: [],
+            newMode: 'line-config'
+        })
+    },
+    {
+        pattern: /^line\s+vty\s+\d+\s+\d+$/i, // Accepts any range e.g. 0 4
+        modes: ['global-config'],
+        help: 'line vty <first> <last> - Enter vty line configuration mode',
+        handler: () => ({
+            output: [],
+            newMode: 'line-config'
+        })
+    },
+    {
+        pattern: /^password\s+(.+)$/i,
+        modes: ['line-config'],
+        help: 'password <password> - Set line password',
+        handler: (args, context) => {
+            return {
+                output: [],
+                updateConfig: {
+                    security: {
+                        ...context.device.security,
+                        consolePassword: args[0],
+                        vtyPassword: args[0]
+                    }
+                }
+            };
+        }
+    },
+    {
+        pattern: /^login$/i,
+        modes: ['line-config'],
+        help: 'login - Enable password checking',
+        handler: () => ({
+            output: []
+        })
+    },
     {
         pattern: /^router\s+ospf\s+(\d+)$/i,
         modes: ['global-config'],
@@ -2735,6 +2799,13 @@ export function getCommandCompletions(partialInput: string, mode: CliMode): stri
             'end': null,
             'exit': null,
             'no': ['network', 'neighbor', 'redistribute'],
+        },
+        'line-config': {
+            'password': null,
+            'login': null,
+            'exit': null,
+            'end': null,
+            'no': ['password', 'login'],
         },
     };
 

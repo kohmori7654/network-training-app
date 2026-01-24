@@ -31,8 +31,8 @@ export default function PortSelectModal({
     if (!sourceDevice || !targetDevice) return null;
 
     // 使用可能なポート（未接続のもののみ）
-    const availableSourcePorts = sourceDevice.ports.filter((p) => p.connectedTo === null);
-    const availableTargetPorts = targetDevice.ports.filter((p) => p.connectedTo === null);
+    const availableSourcePorts = sourceDevice.ports.filter((p) => !p.connectedTo);
+    const availableTargetPorts = targetDevice.ports.filter((p) => !p.connectedTo);
 
     const handleConnect = () => {
         if (selectedSourcePort && selectedTargetPort) {

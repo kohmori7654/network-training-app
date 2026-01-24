@@ -45,7 +45,7 @@ export default function PropertyPanel() {
                         <DetailItem label="STPモード" value={device.stpState.mode} />
                         <DetailItem label="STPプライオリティ" value={device.stpState.priority.toString()} />
                         <DetailItem label="VLAN数" value={device.vlanDb.length.toString()} />
-                        <DetailItem label="MACテーブル" value={`${device.macAddressTable.length} エントリ`} />
+                        <DetailItem label="MACテーブル" value={`${(device.macAddressTable?.length || 0)} エントリ`} />
                     </>
                 );
             }
@@ -55,7 +55,7 @@ export default function PropertyPanel() {
                     <>
                         <DetailItem label="モデル" value={device.model} />
                         <DetailItem label="ルート数" value={device.routingTable.length.toString()} />
-                        <DetailItem label="ARPエントリ" value={device.arpTable.length.toString()} />
+                        <DetailItem label="ARPエントリ" value={(device.arpTable?.length || 0).toString()} />
                         <DetailItem label="HSRPグループ" value={device.hsrpGroups.length.toString()} />
                         <DetailItem label="VLAN数" value={device.vlanDb.length.toString()} />
                     </>
@@ -76,43 +76,71 @@ export default function PropertyPanel() {
     };
 
     const renderPorts = () => {
-        // 全ポートを表示対象にする（未接続も含めるため）が、今の要件では接続ポートの管理が主
-        // ただ「ポート追加」が見えるように、既存ポート一覧の下に追加ボタンを置く形にする
-
-        const connectedPorts = selectedDevice.ports.filter((p) => p.connectedTo !== null);
+        // 全ポートを表示対象にする
+        const allPorts = selectedDevice.ports;
+        const connectedCount = allPorts.filter((p) => !!p.connectedTo).length;
 
         return (
             <div className="mt-4">
                 <h4 className="text-sm font-medium text-slate-300 mb-2">
-                    ポート ({connectedPorts.length}/{selectedDevice.ports.length} 接続中)
+                    ポート ({connectedCount}/{allPorts.length} 接続中)
                 </h4>
 
-                {/* 接続済みポート一覧（切断ボタン付き） */}
-                <div className="max-h-40 overflow-y-auto space-y-1 mb-2">
-                    {connectedPorts.length > 0 ? (
-                        connectedPorts.map((port) => {
-                            // 接続先デバイスとポートを特定する
-                            const targetDevice = devices.find((d) => d.ports.some((p) => p.id === port.connectedTo));
-                            const targetPort = targetDevice?.ports.find((p) => p.id === port.connectedTo);
+                {/* ポート一覧（スクロール） */}
+                <div className="max-h-60 overflow-y-auto space-y-1 mb-2 pr-1">
+                    {allPorts.map((port) => {
+                        const isConnected = !!port.connectedTo;
+                        // 接続先デバイスとポートを特定する
+                        const targetDevice = isConnected ? devices.find((d) => d.ports.some((p) => p.id === port.connectedTo)) : undefined;
+                        const targetPort = targetDevice?.ports.find((p) => p.id === port.connectedTo);
 
-                            return (
-                                <div
-                                    key={port.id}
-                                    className="flex items-center justify-between px-2 py-1 bg-slate-800 rounded text-xs group"
-                                >
-                                    <div className="flex flex-col gap-0.5">
-                                        <div className="flex items-center gap-2">
-                                            <span className={`w-2 h-2 rounded-full ${port.status === 'up' ? 'bg-green-400' : 'bg-red-400'}`} />
-                                            <span className="text-slate-300 font-medium">{port.name}</span>
-                                        </div>
-                                        {targetDevice && targetPort && (
-                                            <div className="pl-4 text-[10px] text-slate-500 flex items-center gap-1">
-                                                <span>→</span>
-                                                <span className="text-slate-400">{targetDevice.hostname}</span>
-                                                <span className="text-slate-600">({targetPort.name})</span>
-                                            </div>
-                                        )}
+                        return (
+                            <div
+                                key={port.id}
+                                className={`flex items-center justify-between px-2 py-1 rounded text-xs group ${isConnected ? 'bg-slate-800' : 'bg-slate-900/50'}`}
+                            >
+                                <div className="flex flex-col gap-0.5 w-full">
+                                    <div className="flex items-center gap-2">
+                                        {/* LED Indicator Script */}
+                                        {(() => {
+                                            let ledClass = 'bg-slate-600'; // Default: Off/Down
+
+                                            if (port.status === 'up') {
+                                                if (selectedDevice.type === 'l2-switch' || selectedDevice.type === 'l3-switch') {
+                                                    const sw = selectedDevice as (L2Switch | L3Switch);
+                                                    const stpStatus = sw.stpState?.portStates?.[port.id];
+
+                                                    if (stpStatus === 'blocking' || stpStatus === 'listening') {
+                                                        ledClass = 'bg-amber-500'; // Amber: Blocking
+                                                    } else if (stpStatus === 'learning') {
+                                                        ledClass = 'bg-amber-500 animate-pulse'; // Blinking Amber: Learning
+                                                    } else if (stpStatus === 'forwarding') {
+                                                        ledClass = 'bg-green-500'; // Green: Forwarding
+                                                    } else if (stpStatus === 'disabled') {
+                                                        ledClass = 'bg-slate-600'; // Off: Disabled
+                                                    } else {
+                                                        ledClass = 'bg-green-500'; // Fallback Green if UP but no STP state
+                                                    }
+                                                } else {
+                                                    // PC / Router (if added later)
+                                                    ledClass = 'bg-green-500'; // Solid Green for Link Up
+                                                }
+                                            }
+
+                                            // Optional: Add blink for activity if we had it, but for now STP states cover blinking
+                                            return <span className={`w-2 h-2 rounded-full ${ledClass} shadow-[0_0_4px_rgba(0,0,0,0.5)]`} title={port.status === 'up' ? 'Link Up' : 'Link Down'} />;
+                                        })()}
+                                        <span className={`font-medium ${isConnected ? 'text-slate-300' : 'text-slate-500'}`}>{port.name}</span>
                                     </div>
+                                    {isConnected && targetDevice && targetPort && (
+                                        <div className="pl-4 text-[10px] text-slate-500 flex items-center gap-1">
+                                            <span>→</span>
+                                            <span className="text-slate-400">{targetDevice.hostname}</span>
+                                            <span className="text-slate-600">({targetPort.name})</span>
+                                        </div>
+                                    )}
+                                </div>
+                                {isConnected ? (
                                     <button
                                         onClick={() => {
                                             if (confirm(`${port.name} の接続を切断しますか？`)) {
@@ -124,15 +152,13 @@ export default function PropertyPanel() {
                                     >
                                         <Trash2 size={12} />
                                     </button>
-                                </div>
-                            );
-                        })
-                    ) : (
-                        <p className="text-xs text-slate-500">接続されているポートはありません</p>
-                    )}
+                                ) : (
+                                    <span className="text-[10px] text-slate-700">未使用</span>
+                                )}
+                            </div>
+                        );
+                    })}
                 </div>
-
-
             </div>
         );
     };

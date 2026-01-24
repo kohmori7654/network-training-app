@@ -19,6 +19,7 @@ interface CliState {
     hostname: string;
     currentInterface?: string;
     currentVlan?: number;
+    authStage: 'none' | 'login' | 'enable';
 }
 
 export default function TerminalPanel({ deviceId, isFullScreen = false, onToggleFullScreen }: TerminalPanelProps) {
@@ -39,6 +40,7 @@ export default function TerminalPanel({ deviceId, isFullScreen = false, onToggle
         hostname: device?.hostname || 'Switch',
         currentInterface: terminalState?.currentInterface,
         currentVlan: terminalState?.currentVlan,
+        authStage: terminalState?.authStage || 'none',
     };
     const commandHistory = terminalState?.commandHistory || [];
 
@@ -59,12 +61,14 @@ export default function TerminalPanel({ deviceId, isFullScreen = false, onToggle
             hostname: device?.hostname || 'Switch',
             currentInterface: currentState?.currentInterface,
             currentVlan: currentState?.currentVlan,
+            authStage: currentState?.authStage || 'none',
         };
         const updatedState = typeof newState === 'function' ? newState(prevCliState) : { ...prevCliState, ...newState };
         updateTerminalState(deviceId, {
             cliMode: updatedState.mode,
             currentInterface: updatedState.currentInterface,
             currentVlan: updatedState.currentVlan,
+            authStage: updatedState.authStage,
         });
     }, [deviceId, terminalStates, updateTerminalState, device?.hostname]);
 
@@ -78,22 +82,36 @@ export default function TerminalPanel({ deviceId, isFullScreen = false, onToggle
     // デバイスが変更されたらターミナルを初期化（既存のステートがない場合のみ）
     useEffect(() => {
         if (device && deviceId && !terminalStates[deviceId]) {
-            updateTerminalState(deviceId, {
-                output: [
-                    '',
-                    '═══════════════════════════════════════════════',
-                    `  ${device.hostname} Console`,
-                    `  Type: ${device.type === 'l2-switch' ? 'Catalyst 2960-X' : device.type === 'l3-switch' ? 'Catalyst 3750-X' : 'PC'}`,
-                    '═══════════════════════════════════════════════',
-                    '',
-                    'Press RETURN to get started.',
-                    '',
-                ],
-                cliMode: 'user',
-                commandHistory: [],
-            });
+            // Initial Auth Check
+            const hasConsolePassword = !!device.security?.consolePassword;
+            if (hasConsolePassword) {
+                updateTerminalState(deviceId, {
+                    output: ['User Access Verification', 'Password: '],
+                    cliMode: 'user',
+                    commandHistory: [],
+                    authStage: 'login',
+                    isConsoleAuthenticated: false,
+                });
+            } else {
+                updateTerminalState(deviceId, {
+                    output: [
+                        '',
+                        '═══════════════════════════════════════════════',
+                        `  ${device.hostname} Console`,
+                        `  Type: ${device.type === 'l2-switch' ? 'Catalyst 2960-X' : device.type === 'l3-switch' ? 'Catalyst 3750-X' : 'PC'}`,
+                        '═══════════════════════════════════════════════',
+                        '',
+                        'Press RETURN to get started.',
+                        '',
+                    ],
+                    cliMode: 'user',
+                    commandHistory: [],
+                    authStage: 'none',
+                    isConsoleAuthenticated: true,
+                });
+            }
         }
-    }, [device?.id, deviceId, terminalStates, updateTerminalState]);
+    }, [device?.id, deviceId, terminalStates, updateTerminalState, device?.security]);
 
     // hostname変更時にcliStateを更新
     useEffect(() => {
@@ -159,6 +177,7 @@ export default function TerminalPanel({ deviceId, isFullScreen = false, onToggle
                 currentInterface: result.newInterface ?? prev.currentInterface,
                 currentVlan: result.newVlan ?? prev.currentVlan,
                 hostname: result.updateConfig?.hostname as string ?? prev.hostname,
+                authStage: 'none', // Reset auth stage on successful normal command
             }));
         }
 
@@ -208,8 +227,63 @@ export default function TerminalPanel({ deviceId, isFullScreen = false, onToggle
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
         if (e.key === 'Enter') {
+            // AUTHENTICATION HANDLING
+            if (cliState.authStage !== 'none') {
+                const password = currentInput;
+                const targetPassword = cliState.authStage === 'login'
+                    ? (device?.security?.consolePassword || device?.security?.vtyPassword)
+                    : (device?.security?.enableSecret || device?.security?.enablePassword);
+
+                // Mask output (don't show password)
+                const fullLine = ''; // Don't echo input
+
+                if (password === targetPassword) {
+                    // Success
+                    if (cliState.authStage === 'login') {
+                        // Logged in
+                        updateTerminalState(deviceId!, {
+                            authStage: 'none',
+                            isConsoleAuthenticated: true,
+                            output: [...output, `${getPrompt()} `] // Show prompt
+                        });
+                        setCliState(prev => ({ ...prev, authStage: 'none' }));
+                    } else {
+                        // Generic Auth Success (Enable mode)
+                        // Trigger the mode switch that was pending (e.g. to Privileged)
+                        updateTerminalState(deviceId!, {
+                            authStage: 'none',
+                            cliMode: 'privileged',
+                            output: [...output, `${device?.hostname}# `]
+                        });
+                        setCliState(prev => ({ ...prev, authStage: 'none', mode: 'privileged' }));
+                    }
+                } else {
+                    // Fail
+                    // Cisco usually waits a bit
+                    // Assuming retry
+                    updateTerminalState(deviceId!, {
+                        output: [...output, 'Password: ']
+                    });
+                }
+                setCurrentInput('');
+                return;
+            }
+
+            // NORMAL COMMAND HANDLING
             const prompt = getPrompt();
             const fullLine = `${prompt} ${currentInput}`;
+
+            // Intercept 'enable' command if secret is set
+            if (currentInput.trim() === 'enable' || currentInput.trim() === 'en') {
+                if (device?.security?.enableSecret || device?.security?.enablePassword) {
+                    setOutput(prev => [...prev, fullLine, 'Password: ']);
+                    setCliState(prev => ({ ...prev, authStage: 'enable' }));
+                    setCurrentInput('');
+                    setHistoryIndex(-1);
+                    return;
+                }
+            }
+
             const result = handleProcessCommand(currentInput);
 
             setOutput(prev => [...prev, fullLine, ...result]);
@@ -277,7 +351,7 @@ export default function TerminalPanel({ deviceId, isFullScreen = false, onToggle
             const prompt = getPrompt();
             setOutput(prev => [
                 ...prev,
-                `${prompt} ${currentInput}?`,
+                `${prompt} ${currentInput} ? `,
                 ...helpLines,
                 '',
             ]);
@@ -327,7 +401,7 @@ export default function TerminalPanel({ deviceId, isFullScreen = false, onToggle
                         value={currentInput}
                         onChange={(e) => setCurrentInput(e.target.value)}
                         onKeyDown={handleKeyDown}
-                        className="flex-1 bg-transparent outline-none border-none text-green-400 caret-green-400"
+                        className={`flex-1 bg-transparent outline-none border-none focus:ring-0 focus:outline-none caret-green-400 ${cliState.authStage !== 'none' ? 'text-transparent' : 'text-green-400'}`}
                         autoFocus
                         spellCheck={false}
                         autoComplete="off"
@@ -354,7 +428,7 @@ function PCTerminal({ device, allDevices, allConnections, isFullScreen = false, 
 
     const [output, setOutput] = useState<string[]>([
         '',
-        `Microsoft Windows [Version 10.0.19045.3803]`,
+        `Microsoft Windows[Version 10.0.19045.3803]`,
         '(c) Microsoft Corporation. All rights reserved.',
         '',
     ]);
@@ -407,17 +481,17 @@ function PCTerminal({ device, allDevices, allConnections, isFullScreen = false, 
                 '',
                 'Windows IP Configuration',
                 '',
-                `   Host Name . . . . . . . . . . . . : ${pc.hostname}`,
+                `   Host Name. . . . . . . . . . . . : ${pc.hostname}`,
                 '',
-                `   Ethernet adapter eth0:`,
+                `   Ethernet adapter eth0: `,
                 '',
-                `      Connection-specific DNS Suffix  . :`,
-                `      Description . . . . . . . . . . . : Intel(R) Ethernet Connection`,
+                `      Connection - specific DNS Suffix. : `,
+                `      Description. . . . . . . . . . . : Intel(R) Ethernet Connection`,
                 `      Physical Address. . . . . . . . . : ${pc.macAddress}`,
                 `      DHCP Enabled. . . . . . . . . . . : No`,
                 `      IPv4 Address. . . . . . . . . . . : ${pc.ipAddress || 'Not configured'}`,
-                `      Subnet Mask . . . . . . . . . . . : ${pc.subnetMask || 'Not configured'}`,
-                `      Default Gateway . . . . . . . . . : ${pc.defaultGateway || 'Not configured'}`,
+                `      Subnet Mask. . . . . . . . . . . : ${pc.subnetMask || 'Not configured'}`,
+                `      Default Gateway. . . . . . . . . : ${pc.defaultGateway || 'Not configured'}`,
                 '',
             ];
         }
@@ -432,28 +506,28 @@ function PCTerminal({ device, allDevices, allConnections, isFullScreen = false, 
 
             const output = [
                 '',
-                `Pinging ${target} with 32 bytes of data:`,
+                `Pinging ${target} with 32 bytes of data: `,
             ];
 
             if (result.success && result.reachable) {
                 for (let i = 0; i < 4; i++) {
-                    output.push(`Reply from ${target}: bytes=32 time=${result.rtt[i]}ms TTL=128`);
+                    output.push(`Reply from ${target}: bytes = 32 time = ${result.rtt[i]}ms TTL = 128`);
                 }
                 const min = Math.min(...result.rtt);
                 const max = Math.max(...result.rtt);
                 const avg = Math.floor(result.rtt.reduce((a, b) => a + b, 0) / result.rtt.length);
                 output.push('');
-                output.push(`Ping statistics for ${target}:`);
-                output.push(`    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss),`);
-                output.push(`Approximate round trip times in milli-seconds:`);
-                output.push(`    Minimum = ${min}ms, Maximum = ${max}ms, Average = ${avg}ms`);
+                output.push(`Ping statistics for ${target}: `);
+                output.push(`    Packets: Sent = 4, Received = 4, Lost = 0(0 % loss), `);
+                output.push(`Approximate round trip times in milli - seconds: `);
+                output.push(`    Minimum = ${min} ms, Maximum = ${max} ms, Average = ${avg} ms`);
             } else {
                 for (let i = 0; i < 4; i++) {
                     output.push(result.errors[0] || 'Request timed out.');
                 }
                 output.push('');
-                output.push(`Ping statistics for ${target}:`);
-                output.push(`    Packets: Sent = 4, Received = 0, Lost = 4 (100% loss),`);
+                output.push(`Ping statistics for ${target}: `);
+                output.push(`    Packets: Sent = 4, Received = 0, Lost = 4(100 % loss), `);
             }
             output.push('');
             return output;
@@ -469,7 +543,7 @@ function PCTerminal({ device, allDevices, allConnections, isFullScreen = false, 
 
             const output = [
                 '',
-                `Tracing route to ${target}`,
+                `Tracing route to ${target} `,
                 'over a maximum of 30 hops:',
                 '',
             ];
@@ -488,7 +562,7 @@ function PCTerminal({ device, allDevices, allConnections, isFullScreen = false, 
                         output.push(`  ${hop.hop.toString().padEnd(2)}    ${rtt.toString().padEnd(5)} ms    ${rtt.toString().padEnd(5)} ms    ${rtt.toString().padEnd(5)} ms  ${hop.ip} [${hop.hostname}]`);
                     }
                 }
-                output.push(`  ${(result.hops.length + 1).toString().padEnd(2)}     *        *        *     Request timed out.`);
+                output.push(`  ${(result.hops.length + 1).toString().padEnd(2)}     *        *        * Request timed out.`);
                 output.push('');
                 output.push(result.errors[0] || 'Trace failed.');
             }
@@ -528,12 +602,12 @@ function PCTerminal({ device, allDevices, allConnections, isFullScreen = false, 
             return [];
         }
 
-        return ['', `'${command.split(' ')[0]}' is not recognized as an internal or external command,`, 'operable program or batch file.', ''];
+        return ['', `'${command.split(' ')[0]}' is not recognized as an internal or external command, `, 'operable program or batch file.', ''];
     };
 
     const handleKeyDown = (e: React.KeyboardEvent) => {
         if (e.key === 'Enter') {
-            const fullLine = `C:\\Users\\${pc.hostname}> ${currentInput}`;
+            const fullLine = `C: \\Users\\${pc.hostname}> ${currentInput} `;
             const result = processCommand(currentInput);
             setOutput(prev => [...prev, fullLine, ...result]);
 

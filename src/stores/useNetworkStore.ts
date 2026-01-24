@@ -64,6 +64,7 @@ export const createL2Switch = (name: string, position: Position): L2Switch => ({
     ports: createL2SwitchPorts(),
     vlanDb: [{ id: 1, name: 'default', status: 'active' }],
     macAddressTable: [],
+    macAddress: generateMacAddress(),
     stpState: {
         mode: 'rapid-pvst',
         priority: 32768,
@@ -77,6 +78,7 @@ export const createL2Switch = (name: string, position: Position): L2Switch => ({
         '!',
     ],
     etherChannels: [],
+    security: {},
 });
 
 export const createL3Switch = (name: string, position: Position): L3Switch => ({
@@ -89,6 +91,7 @@ export const createL3Switch = (name: string, position: Position): L3Switch => ({
     ports: createL3SwitchPorts(),
     vlanDb: [{ id: 1, name: 'default', status: 'active' }],
     macAddressTable: [],
+    macAddress: generateMacAddress(),
     stpState: {
         mode: 'rapid-pvst',
         priority: 32768,
@@ -105,6 +108,7 @@ export const createL3Switch = (name: string, position: Position): L3Switch => ({
         '!',
     ],
     etherChannels: [],
+    security: {},
 });
 
 export const createPC = (name: string, position: Position): PC => ({
@@ -243,6 +247,19 @@ const buildScenario = (state: typeof initialState) => {
     // SVI (HSRP) on DSW1/2 for Vlan 10
     dsw1.hsrpGroups.push({ group: 10, virtualIp: '192.168.10.254', priority: 110, preempt: true, state: 'active', helloTimer: 3, holdTimer: 10 });
     dsw2.hsrpGroups.push({ group: 10, virtualIp: '192.168.10.254', priority: 90, preempt: true, state: 'standby', helloTimer: 3, holdTimer: 10 });
+
+    // Initialize STP states for all connected ports
+    conns.forEach(conn => {
+        const updateDevStp = (devId: string, portId: string) => {
+            const dev = state.devices.find(d => d.id === devId);
+            if (dev && (dev.type === 'l2-switch' || dev.type === 'l3-switch')) {
+                const sw = dev as (L2Switch | L3Switch);
+                sw.stpState.portStates[portId] = 'forwarding';
+            }
+        };
+        updateDevStp(conn.sourceDeviceId, conn.sourcePortId);
+        updateDevStp(conn.targetDeviceId, conn.targetPortId);
+    });
 
     return state;
 };
@@ -407,13 +424,76 @@ export const useNetworkStore = create<NetworkStore>()(
                             id: connectionId,
                             sourceDeviceId,
                             sourcePortId,
-                            sourceHandle: sourceHandle || undefined, // Store Handle ID
+                            sourceHandle: sourceHandle || undefined,
                             targetDeviceId,
                             targetPortId,
-                            targetHandle: targetHandle || undefined, // Store Handle ID
+                            targetHandle: targetHandle || undefined,
                             status: 'up',
                         },
                     ],
+                }));
+
+                // Initial STP Hook: Trigger Blocking -> Learning -> Forwarding
+                // Helper to update STP state
+                const updateStp = (devId: string, portId: string, state: 'blocking' | 'learning' | 'forwarding') => {
+                    set((s) => ({
+                        devices: s.devices.map((d) => {
+                            if (d.id === devId && (d.type === 'l2-switch' || d.type === 'l3-switch')) {
+                                return {
+                                    ...d,
+                                    stpState: {
+                                        ...((d as L2Switch).stpState),
+                                        portStates: {
+                                            ...((d as L2Switch).stpState.portStates),
+                                            [portId]: state
+                                        }
+                                    }
+                                } as Device;
+                            }
+                            return d;
+                        })
+                    }));
+                };
+
+                const triggerStpSequence = (devId: string, portId: string) => {
+                    const dev = get().devices.find(d => d.id === devId);
+                    if (dev && (dev.type === 'l2-switch' || dev.type === 'l3-switch')) {
+                        // Start Blocking (Amber)
+                        updateStp(devId, portId, 'blocking');
+
+                        // To Learning (Blinking Amber) after 2s
+                        setTimeout(() => {
+                            updateStp(devId, portId, 'learning');
+                            // To Forwarding (Green) after another 2s
+                            setTimeout(() => {
+                                updateStp(devId, portId, 'forwarding');
+                            }, 2000);
+                        }, 2000);
+                    }
+                };
+
+                triggerStpSequence(sourceDeviceId, sourcePortId);
+                triggerStpSequence(targetDeviceId, targetPortId);
+            },
+
+            // Set port STP state (internal/expert use)
+            setPortStpState: (deviceId: string, portId: string, state: 'blocking' | 'learning' | 'forwarding') => {
+                set((s) => ({
+                    devices: s.devices.map((d) => {
+                        if (d.id === deviceId && (d.type === 'l2-switch' || d.type === 'l3-switch')) {
+                            return {
+                                ...d,
+                                stpState: {
+                                    ...((d as L2Switch).stpState),
+                                    portStates: {
+                                        ...((d as L2Switch).stpState.portStates),
+                                        [portId]: state
+                                    }
+                                }
+                            } as Device;
+                        }
+                        return d;
+                    })
                 }));
             },
 

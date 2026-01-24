@@ -8,6 +8,11 @@ import DevicePalette from '@/features/canvas/DevicePalette';
 import PropertyPanel from '@/features/devices/PropertyPanel';
 import TerminalPanel from '@/features/terminal/TerminalPanel';
 import PCConfigModal from '@/features/devices/PCConfigModal';
+import { useTemplateStore } from '@/features/templates/useTemplateStore';
+import { ModeSwitcher } from '@/features/templates/ModeSwitcher';
+import { TemplateDashboard } from '@/features/templates/TemplateDashboard';
+import { SaveTemplateModal } from '@/features/templates/SaveTemplateModal';
+import { Save } from 'lucide-react';
 
 // React Flowはクライアントサイドのみでレンダリング
 const NetworkCanvas = dynamic(
@@ -31,7 +36,12 @@ export default function MainLayout() {
     const [panelWidth, setPanelWidth] = useState(DEFAULT_PANEL_WIDTH);
     const [isPanelOpen, setIsPanelOpen] = useState(true);
     const [isResizing, setIsResizing] = useState(false);
+
     const [isTerminalFullScreen, setIsTerminalFullScreen] = useState(false);
+
+    // Template Mode State
+    const { currentMode, isMockAuthEnabled } = useTemplateStore();
+    const [isSaveModalOpen, setIsSaveModalOpen] = useState(false);
 
     // リサイズ用Ref
     const sidebarRef = useRef<HTMLDivElement>(null);
@@ -134,7 +144,20 @@ export default function MainLayout() {
                     </div>
                 </div>
 
+                <div className="mx-4">
+                    <ModeSwitcher />
+                </div>
+
                 <div className="flex items-center gap-2">
+                    {currentMode === 'free' && isMockAuthEnabled && (
+                        <button
+                            onClick={() => setIsSaveModalOpen(true)}
+                            className="flex items-center gap-2 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-700 text-white text-sm rounded transition-colors mr-2"
+                        >
+                            <Save size={16} />
+                            Save as Template
+                        </button>
+                    )}
                     <button
                         onClick={handleExport}
                         className="flex items-center gap-2 px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white text-sm rounded transition-colors"
@@ -164,12 +187,16 @@ export default function MainLayout() {
                 {/* 左: デバイスパレット */}
                 <DevicePalette />
 
-                {/* 中央: キャンバス */}
-                <div className="flex-1 h-full relative">
-                    <NetworkCanvas />
+                {/* 中央: キャンバス or ダッシュボード */}
+                <div className="flex-1 h-full relative flex flex-col">
+                    {currentMode === 'preset' ? (
+                        <TemplateDashboard />
+                    ) : (
+                        <NetworkCanvas />
+                    )}
 
-                    {/* 折り畳み展開ボタン（パネルが閉じているとき表示） */}
-                    {!isPanelOpen && (
+                    {/* 折り畳み展開ボタン（パネルが閉じているとき表示 - Free Mode Only） */}
+                    {!isPanelOpen && currentMode === 'free' && (
                         <button
                             onClick={() => setIsPanelOpen(true)}
                             className="absolute top-4 right-0 bg-slate-800 text-blue-400 p-2 rounded-l-md border border-r-0 border-slate-600 shadow-md hover:bg-slate-700 z-10 transition-colors"
@@ -180,8 +207,8 @@ export default function MainLayout() {
                     )}
                 </div>
 
-                {/* 右: プロパティ/ターミナルパネル */}
-                {isPanelOpen && (
+                {/* 右: プロパティ/ターミナルパネル (Free Mode Only) */}
+                {isPanelOpen && currentMode === 'free' && (
                     <div
                         ref={sidebarRef}
                         className="flex h-full relative"
@@ -265,6 +292,11 @@ export default function MainLayout() {
                     setPcModalDeviceId(null);
                 }}
             />
+
+            {/* テンプレート保存モーダル */}
+            {isSaveModalOpen && (
+                <SaveTemplateModal onClose={() => setIsSaveModalOpen(false)} />
+            )}
 
             {/* リサイズ中のオーバーレイ（操作感をスムーズにするため） */}
             {isResizing && (

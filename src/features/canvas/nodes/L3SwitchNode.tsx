@@ -43,7 +43,9 @@ const getHsrpStateLabel = (state: HsrpState['state']) => {
 function L3SwitchNode({ data, selected }: L3SwitchNodeProps) {
     const device = data.device;
     const connectedPorts = device.ports.filter(p => p.connectedTo !== null).length;
-    const primaryHsrp = device.hsrpGroups[0]; // 最初のHSRPグループを表示
+
+    const hsrpGroups = device.hsrpGroups || []; // 安全なアクセス
+    const primaryHsrp = hsrpGroups[0]; // 最初のHSRPグループを表示
 
     return (
         <div
@@ -118,7 +120,7 @@ function L3SwitchNode({ data, selected }: L3SwitchNodeProps) {
                         </div>
                     </>
                 )}
-                {!primaryHsrp && device.hsrpGroups.length === 0 && (
+                {!primaryHsrp && hsrpGroups.length === 0 && (
                     <div className="text-blue-300/60 italic">HSRP未設定</div>
                 )}
             </div>
