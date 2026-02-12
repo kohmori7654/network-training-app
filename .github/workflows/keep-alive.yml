@@ -5,7 +5,7 @@ on:
     - cron: '0 0 * * *' # 毎日 UTC 0:00 (日本時間 9:00)
   workflow_dispatch:
 
-# 【重要】リポジトリに書き込む権限を与えます
+# git push するための権限設定
 permissions:
   contents: write
 
@@ -15,14 +15,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 1. 60日ルール対策：50日経過していたら自動でコミットしてリセットする
-      - name: Prevent 60-day disablement
-        uses: gautamkrishnar/keepalive-workflow@v2
-        with:
-          commit_message: "Automated activity to keep workflow alive"
-          committer_username: "github-actions[bot]"
-          committer_email: "41898282+github-actions[bot]@users.noreply.github.com"
-          time_elapsed: 50 # 最後のコミットから50日経っていたら実行
+      # 1. 60日ルール対策：50日以上更新がなければ、自動で空コミットを入れる
+      # 外部アクションを使わず、gitコマンドで直接実行することでブロックを回避します
+      - name: Auto Commit to keep workflow alive
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          
+          # 最後のコミット日時を取得して、経過日数を計算
+          last_commit_date=$(git log -1 --format=%ct)
+          current_date=$(date +%s)
+          days_since_last_commit=$(( (current_date - last_commit_date) / 86400 ))
+          
+          echo "Days since last commit: $days_since_last_commit"
+          
+          # 50日以上経過していたら空コミットをしてpushする
+          if [ "$days_since_last_commit" -gt 50 ]; then
+            echo "Committing to keep workflow alive..."
+            git commit --allow-empty -m "Automated activity to keep workflow alive"
+            git push
+          else
+            echo "No need to commit yet."
+          fi
 
       # 2. Supabase対策：APIを叩いてデータベース停止を防ぐ
       - name: Ping Supabase API
