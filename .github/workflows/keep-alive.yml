@@ -6,35 +6,23 @@ on:
   workflow_dispatch:
 
 jobs:
-  ping-db:
+  ping-api:
     runs-on: ubuntu-latest
     steps:
-      - name: Install PostgreSQL Client
+      - name: Ping Supabase API
         run: |
-          sudo apt-get update
-          sudo apt-get install -y postgresql-client
-
-      - name: Force IPv4 via /etc/hosts
-        run: |
-          # SupabaseのドメインからIPv4アドレス(Aレコード)だけを抽出します
-          DB_HOST="db.adfxadnpcrtyfeqgfqfm.supabase.co"
-          IPV4=$(dig +short A $DB_HOST | head -n 1)
+          # データベース直接接続の代わりに、Web APIを叩いてプロジェクトを維持します
+          # HTTPリクエストなので、IPv6問題は発生しません
+          response=$(curl -s -o /dev/null -w "%{http_code}" -X GET \
+            "https://adfxadnpcrtyfeqgfqfm.supabase.co/rest/v1/" \
+            -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}")
           
-          if [ -z "$IPV4" ]; then
-            echo "IPv4 address not found."
-            exit 1
+          echo "Status Code: $response"
+          
+          if [ "$response" -eq 200 ]; then
+            echo "Success! Supabase project is active."
+          else
+            echo "Warning: Received status code $response"
+            # 200以外でもアクセス自体は届いているので維持はされますが、念のためログに残します
           fi
-
-          echo "Found IPv4: $IPV4"
-          # /etc/hosts に書き込んで、このドメインを強制的にIPv4で解決させます
-          echo "$IPV4 $DB_HOST" | sudo tee -a /etc/hosts
-
-      - name: Run Keep-Alive Query
-        run: psql -c "SELECT 1;"
-        env:
-          # IPv4化済みのDirect接続先を指定
-          PGHOST: db.adfxadnpcrtyfeqgfqfm.supabase.co
-          PGPORT: 5432
-          PGUSER: postgres
-          PGDATABASE: postgres
-          PGPASSWORD: ${{ secrets.SUPABASE_PASSWORD }}
