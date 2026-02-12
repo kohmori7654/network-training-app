@@ -2,8 +2,8 @@ name: Supabase Keep Alive
 
 on:
   schedule:
-    - cron: '0 0 * * *' # 毎日 UTC 0:00 (日本時間 9:00) に実行
-  workflow_dispatch:    # 手動実行ボタンを有効化（テスト用）
+    - cron: '0 0 * * *' # 毎日 UTC 0:00 (日本時間 9:00)
+  workflow_dispatch:
 
 jobs:
   ping-db:
@@ -15,6 +15,11 @@ jobs:
           sudo apt-get install -y postgresql-client
 
       - name: Run Keep-Alive Query
-        run: psql "$DATABASE_URL" -c "SELECT 1;"
+        run: psql -c "SELECT 1;"
         env:
-          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
+          # ここで接続情報を個別に指定（ミスが起きない方法）
+          PGHOST: aws-0-ap-northeast-1.pooler.supabase.co
+          PGPORT: 6543
+          PGUSER: postgres.adfxadnpcrtyfeqgfqfm
+          PGDATABASE: postgres
+          PGPASSWORD: ${{ secrets.SUPABASE_PASSWORD }}
