@@ -9,21 +9,30 @@ jobs:
   ping-db:
     runs-on: ubuntu-latest
     steps:
-      - name: Disable IPv6 (Force IPv4)
-        run: |
-          # ネットワークエラーの原因となるIPv6を無効化し、IPv4接続を強制します
-          sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1
-          sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1
-
       - name: Install PostgreSQL Client
         run: |
           sudo apt-get update
           sudo apt-get install -y postgresql-client
 
+      - name: Force IPv4 via /etc/hosts
+        run: |
+          # SupabaseのドメインからIPv4アドレス(Aレコード)だけを抽出します
+          DB_HOST="db.adfxadnpcrtyfeqgfqfm.supabase.co"
+          IPV4=$(dig +short A $DB_HOST | head -n 1)
+          
+          if [ -z "$IPV4" ]; then
+            echo "IPv4 address not found."
+            exit 1
+          fi
+
+          echo "Found IPv4: $IPV4"
+          # /etc/hosts に書き込んで、このドメインを強制的にIPv4で解決させます
+          echo "$IPV4 $DB_HOST" | sudo tee -a /etc/hosts
+
       - name: Run Keep-Alive Query
         run: psql -c "SELECT 1;"
         env:
-          # シンプルな直接接続の設定（ここなら間違いないです）
+          # IPv4化済みのDirect接続先を指定
           PGHOST: db.adfxadnpcrtyfeqgfqfm.supabase.co
           PGPORT: 5432
           PGUSER: postgres
