@@ -1,55 +1,35 @@
-name: Supabase Keep Alive
+name: Prevent 60-day Disablement
 
 on:
   schedule:
     - cron: '0 0 * * *' # 毎日 UTC 0:00 (日本時間 9:00)
   workflow_dispatch:
 
-# git push するための権限設定
 permissions:
   contents: write
 
 jobs:
-  keep-alive:
+  auto-commit:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
 
-      # 1. 60日ルール対策：50日以上更新がなければ、自動で空コミットを入れる
-      # 外部アクションを使わず、gitコマンドで直接実行することでブロックを回避します
-      - name: Auto Commit to keep workflow alive
+      - name: Auto Commit if inactive
         run: |
           git config --global user.name "github-actions[bot]"
           git config --global user.email "41898282+github-actions[bot]@users.noreply.github.com"
           
-          # 最後のコミット日時を取得して、経過日数を計算
           last_commit_date=$(git log -1 --format=%ct)
           current_date=$(date +%s)
           days_since_last_commit=$(( (current_date - last_commit_date) / 86400 ))
           
           echo "Days since last commit: $days_since_last_commit"
           
-          # 50日以上経過していたら空コミットをしてpushする
           if [ "$days_since_last_commit" -gt 50 ]; then
             echo "Committing to keep workflow alive..."
-            git commit --allow-empty -m "Automated activity to keep workflow alive"
+            # 【重要】[skip ci] を入れることで、Vercelの無駄なビルドを防ぎます
+            git commit --allow-empty -m "Automated activity to keep workflow alive [skip ci]"
             git push
           else
             echo "No need to commit yet."
-          fi
-
-      # 2. Supabase対策：APIを叩いてデータベース停止を防ぐ
-      - name: Ping Supabase API
-        run: |
-          response=$(curl -s -o /dev/null -w "%{http_code}" -X GET \
-            "https://adfxadnpcrtyfeqgfqfm.supabase.co/rest/v1/" \
-            -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}" \
-            -H "Authorization: Bearer ${{ secrets.SUPABASE_ANON_KEY }}")
-          
-          echo "Status Code: $response"
-          
-          if [ "$response" -eq 200 ]; then
-            echo "Success! Supabase project is active."
-          else
-            echo "Warning: Received status code $response"
           fi
