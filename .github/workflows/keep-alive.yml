@@ -15,9 +15,9 @@ jobs:
           sudo apt-get install -y postgresql-client
 
       - name: Run Keep-Alive Query
+        # URLを使わず、環境変数で個別に指定する方式に変更
         run: psql -c "SELECT 1;"
         env:
-          # ここで接続情報を個別に指定（ミスが起きない方法）
           PGHOST: aws-0-ap-northeast-1.pooler.supabase.co
           PGPORT: 6543
           PGUSER: postgres.adfxadnpcrtyfeqgfqfm
