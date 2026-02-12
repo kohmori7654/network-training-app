@@ -5,14 +5,28 @@ on:
     - cron: '0 0 * * *' # 毎日 UTC 0:00 (日本時間 9:00)
   workflow_dispatch:
 
+# 【重要】リポジトリに書き込む権限を与えます
+permissions:
+  contents: write
+
 jobs:
-  ping-api:
+  keep-alive:
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
+      # 1. 60日ルール対策：50日経過していたら自動でコミットしてリセットする
+      - name: Prevent 60-day disablement
+        uses: gautamkrishnar/keepalive-workflow@v2
+        with:
+          commit_message: "Automated activity to keep workflow alive"
+          committer_username: "github-actions[bot]"
+          committer_email: "41898282+github-actions[bot]@users.noreply.github.com"
+          time_elapsed: 50 # 最後のコミットから50日経っていたら実行
+
+      # 2. Supabase対策：APIを叩いてデータベース停止を防ぐ
       - name: Ping Supabase API
         run: |
-          # データベース直接接続の代わりに、Web APIを叩いてプロジェクトを維持します
-          # HTTPリクエストなので、IPv6問題は発生しません
           response=$(curl -s -o /dev/null -w "%{http_code}" -X GET \
             "https://adfxadnpcrtyfeqgfqfm.supabase.co/rest/v1/" \
             -H "apikey: ${{ secrets.SUPABASE_ANON_KEY }}" \
@@ -24,5 +38,4 @@ jobs:
             echo "Success! Supabase project is active."
           else
             echo "Warning: Received status code $response"
-            # 200以外でもアクセス自体は届いているので維持はされますが、念のためログに残します
           fi
