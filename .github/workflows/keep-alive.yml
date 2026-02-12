@@ -9,6 +9,12 @@ jobs:
   ping-db:
     runs-on: ubuntu-latest
     steps:
+      - name: Disable IPv6 (Force IPv4)
+        run: |
+          # ネットワークエラーの原因となるIPv6を無効化し、IPv4接続を強制します
+          sudo sysctl -w net.ipv6.conf.all.disable_ipv6=1
+          sudo sysctl -w net.ipv6.conf.default.disable_ipv6=1
+
       - name: Install PostgreSQL Client
         run: |
           sudo apt-get update
@@ -17,9 +23,9 @@ jobs:
       - name: Run Keep-Alive Query
         run: psql -c "SELECT 1;"
         env:
-          # 末尾を .co から .com に修正しました
-          PGHOST: aws-0-ap-northeast-1.pooler.supabase.com
-          PGPORT: 6543
-          PGUSER: postgres.adfxadnpcrtyfeqgfqfm
+          # シンプルな直接接続の設定（ここなら間違いないです）
+          PGHOST: db.adfxadnpcrtyfeqgfqfm.supabase.co
+          PGPORT: 5432
+          PGUSER: postgres
           PGDATABASE: postgres
           PGPASSWORD: ${{ secrets.SUPABASE_PASSWORD }}
