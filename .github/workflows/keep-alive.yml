@@ -1,0 +1,20 @@
+name: Supabase Keep Alive
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # 毎日 UTC 0:00 (日本時間 9:00) に実行
+  workflow_dispatch:    # 手動実行ボタンを有効化（テスト用）
+
+jobs:
+  ping-db:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install PostgreSQL Client
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+
+      - name: Run Keep-Alive Query
+        run: psql "$DATABASE_URL" -c "SELECT 1;"
+        env:
+          DATABASE_URL: ${{ secrets.SUPABASE_DB_URL }}
