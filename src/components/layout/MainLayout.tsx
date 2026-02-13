@@ -4,6 +4,7 @@ import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { Download, UploadCloud, RotateCcw, Network, ChevronRight, ChevronLeft, ClipboardCopy } from 'lucide-react';
 import dynamic from 'next/dynamic';
 import useNetworkStore from '@/stores/useNetworkStore';
+import { useNotificationStore } from '@/stores/useNotificationStore';
 import DevicePalette from '@/features/canvas/DevicePalette';
 import PropertyPanel from '@/features/devices/PropertyPanel';
 import TerminalPanel from '@/features/terminal/TerminalPanel';
@@ -12,7 +13,7 @@ import { useTemplateStore } from '@/features/templates/useTemplateStore';
 import { ModeSwitcher } from '@/features/templates/ModeSwitcher';
 import { TemplateDashboard } from '@/features/templates/TemplateDashboard';
 import { SaveTemplateModal } from '@/features/templates/SaveTemplateModal';
-import CopyJsonFallbackModal from '@/components/CopyJsonFallbackModal';
+import JsonResultModal from '@/components/JsonResultModal';
 import { Save } from 'lucide-react';
 
 // React Flowはクライアントサイドのみでレンダリング
@@ -24,11 +25,13 @@ const NetworkCanvas = dynamic(
 type RightPanelTab = 'properties' | 'terminal';
 
 const MIN_PANEL_WIDTH = 250;
-const MAX_PANEL_WIDTH = 600;
+const DEVICE_PALETTE_WIDTH = 208; // w-52 = 13rem
+const MIN_CANVAS_WIDTH = 100;
 const DEFAULT_PANEL_WIDTH = 320;
 
 export default function MainLayout() {
     const { selectedDeviceId, exportToJson, importFromJson, resetState } = useNetworkStore();
+    const { toast, confirm } = useNotificationStore();
     const [activeTab, setActiveTab] = useState<RightPanelTab>('properties');
     const [pcModalOpen, setPcModalOpen] = useState(false);
     const [pcModalDeviceId, setPcModalDeviceId] = useState<string | null>(null);
@@ -44,8 +47,8 @@ export default function MainLayout() {
     const { currentMode, isMockAuthEnabled, subscribeToTemplates } = useTemplateStore();
     const [isSaveModalOpen, setIsSaveModalOpen] = useState(false);
 
-    // Copy JSON 失敗時のフォールバック（埋め込み iframe でクリップボード API が使えない場合）
-    const [copyFallbackJson, setCopyFallbackJson] = useState<string | null>(null);
+    // Copy JSON 結果表示用モーダル
+    const [jsonResult, setJsonResult] = useState<{ json: string; type: 'success' | 'error' } | null>(null);
 
     // Subscribe to templates for real-time updates
     useEffect(() => {
@@ -84,7 +87,9 @@ export default function MainLayout() {
         (mouseMoveEvent: MouseEvent) => {
             if (isResizing) {
                 const newWidth = document.body.clientWidth - mouseMoveEvent.clientX;
-                if (newWidth >= MIN_PANEL_WIDTH && newWidth <= MAX_PANEL_WIDTH) {
+                const maxAllowedWidth = document.body.clientWidth - DEVICE_PALETTE_WIDTH - MIN_CANVAS_WIDTH;
+
+                if (newWidth >= MIN_PANEL_WIDTH && newWidth <= maxAllowedWidth) {
                     setPanelWidth(newWidth);
                 }
             }
@@ -127,9 +132,9 @@ export default function MainLayout() {
             const text = await file.text();
             const success = importFromJson(text);
             if (success) {
-                alert('トポロジをインポートしました');
+                toast('トポロジをインポートしました');
             } else {
-                alert('インポートに失敗しました。ファイル形式を確認してください。');
+                toast('インポートに失敗しました。ファイル形式を確認してください。');
             }
         };
         input.click();
@@ -137,10 +142,10 @@ export default function MainLayout() {
 
     // リセット
     const handleReset = useCallback(() => {
-        if (confirm('【警告】\n\nすべての機器と設定を削除します。\nこの操作は取り消せません。\n\n本当に実行しますか？')) {
-            resetState();
-        }
-    }, [resetState]);
+        confirm('【警告】\n\nすべての機器と設定を削除します。\nこの操作は取り消せません。\n\n本当に実行しますか？').then((ok) => {
+            if (ok) resetState();
+        });
+    }, [resetState, confirm]);
 
     // クリップボードへコピー（iframe 埋め込み時も動作するよう execCommand フォールバック付き）
     const copyToClipboard = useCallback((text: string): Promise<boolean> => {
@@ -169,10 +174,11 @@ export default function MainLayout() {
         const json = exportToJson();
         copyToClipboard(json).then((ok) => {
             if (ok) {
-                alert('クリップボードにコピーしました');
+                // 成功時もポップアップで通知（ユーザー要望）
+                setJsonResult({ json, type: 'success' });
             } else {
-                // 埋め込み iframe ではクリップボード API が制限されるため、フォールバックモーダルを表示
-                setCopyFallbackJson(json);
+                // 失敗時（iframe等）
+                setJsonResult({ json, type: 'error' });
             }
         });
     }, [exportToJson, copyToClipboard]);
@@ -350,11 +356,12 @@ export default function MainLayout() {
                 <SaveTemplateModal onClose={() => setIsSaveModalOpen(false)} />
             )}
 
-            {/* Copy JSON 失敗時のフォールバックモーダル（埋め込み iframe 用） */}
-            {copyFallbackJson && (
-                <CopyJsonFallbackModal
-                    json={copyFallbackJson}
-                    onClose={() => setCopyFallbackJson(null)}
+            {/* Copy JSON 結果モーダル */}
+            {jsonResult && (
+                <JsonResultModal
+                    json={jsonResult.json}
+                    type={jsonResult.type}
+                    onClose={() => setJsonResult(null)}
                 />
             )}
 

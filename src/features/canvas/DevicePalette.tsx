@@ -30,7 +30,25 @@ function DevicePaletteItem({ type, label, icon, description }: DevicePaletteItem
 
 export default function DevicePalette() {
     const [activeTab, setActiveTab] = React.useState<'devices' | 'memo'>('devices');
-    const { note, setNote } = useNetworkStore();
+    const {
+        memos,
+        activeMemoId,
+        setActiveMemo,
+        updateMemo,
+        exportToJson,
+        devices,
+        connections
+    } = useNetworkStore();
+
+    const activeMemo = memos.find(m => m.id === activeMemoId);
+    const isJsonView = activeMemo?.type === 'json';
+
+    const displayContent = React.useMemo(() => {
+        if (isJsonView) {
+            return exportToJson();
+        }
+        return activeMemo?.content || '';
+    }, [isJsonView, exportToJson, activeMemo?.content, activeMemoId, devices, connections]); // dependencies for realtime update
 
     return (
         <div className="w-52 bg-slate-900 border-r border-slate-700 flex flex-col">
@@ -85,12 +103,29 @@ export default function DevicePalette() {
                         />
                     </div>
                 ) : (
-                    <div className="flex flex-col h-full bg-slate-800">
+                    <div className="flex flex-col h-full bg-slate-800 p-2 gap-2">
+                        <select
+                            value={activeMemoId}
+                            onChange={(e) => setActiveMemo(e.target.value)}
+                            className="w-full p-2 bg-slate-900 text-white text-xs rounded border border-slate-700 outline-none focus:border-blue-500 cursor-pointer"
+                        >
+                            {memos.map(memo => (
+                                <option key={memo.id} value={memo.id}>
+                                    {memo.title}
+                                </option>
+                            ))}
+                        </select>
                         <textarea
-                            value={note}
-                            onChange={(e) => setNote(e.target.value)}
+                            value={displayContent}
+                            onChange={(e) => {
+                                if (!isJsonView && activeMemo) {
+                                    updateMemo(activeMemo.id, e.target.value);
+                                }
+                            }}
+                            readOnly={isJsonView || activeMemo?.readOnly}
                             placeholder="ここにメモを入力できます。&#13;&#10;内容はJSONに保存されます。"
-                            className="flex-1 w-full bg-slate-900 text-slate-300 p-3 text-xs resize-none focus:outline-none focus:ring-1 focus:ring-blue-500 border-none"
+                            className={`flex-1 w-full bg-slate-900 p-3 text-xs resize-none focus:outline-none focus:ring-1 focus:ring-blue-500 border-none ${isJsonView ? 'text-green-400 font-mono' : 'text-slate-300'
+                                }`}
                             style={{ lineHeight: '1.5' }}
                         />
                     </div>

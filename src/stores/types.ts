@@ -230,12 +230,21 @@ export interface TerminalState {
   isConsoleAuthenticated?: boolean; // For tracking initial login
 }
 
+export interface Memo {
+  id: string;
+  title: string;
+  content: string;
+  type: 'text' | 'json';
+  readOnly: boolean;
+}
+
 export interface NetworkState {
   devices: Device[];
   connections: Connection[];
   selectedDeviceId: string | null;
   terminalStates: { [deviceId: string]: TerminalState };
-  note: string; // Added note field
+  memos: Memo[];
+  activeMemoId: string;
 }
 
 // ========== アクション ==========
@@ -276,7 +285,8 @@ export interface NetworkActions {
   recalculateRoutes: () => void;
 
   // メモ機能
-  setNote: (note: string) => void;
+  updateMemo: (id: string, content: string) => void;
+  setActiveMemo: (id: string) => void;
 }
 
 export type NetworkStore = NetworkState & NetworkActions;

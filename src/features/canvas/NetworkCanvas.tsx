@@ -19,6 +19,7 @@ import {
 import '@xyflow/react/dist/style.css';
 
 import useNetworkStore, { createL2Switch, createL3Switch, createPC } from '@/stores/useNetworkStore';
+import { useNotificationStore } from '@/stores/useNotificationStore';
 import L2SwitchNode from './nodes/L2SwitchNode';
 import L3SwitchNode from './nodes/L3SwitchNode';
 import PCNode from './nodes/PCNode';
@@ -49,6 +50,7 @@ function NetworkCanvasInner() {
         selectDevice,
         removeConnection,
     } = useNetworkStore();
+    const confirm = useNotificationStore((s) => s.confirm);
 
     const [portSelectModal, setPortSelectModal] = useState<{
         open: boolean;
@@ -212,11 +214,11 @@ function NetworkCanvasInner() {
     // エッジ削除時
     const onEdgeClick = useCallback(
         (_: React.MouseEvent, edge: Edge) => {
-            if (confirm('この接続を削除しますか？')) {
-                removeConnection(edge.id);
-            }
+            confirm('この接続を削除しますか？').then((ok) => {
+                if (ok) removeConnection(edge.id);
+            });
         },
-        [removeConnection]
+        [removeConnection, confirm]
     );
 
     // ドラッグ＆ドロップでデバイス追加

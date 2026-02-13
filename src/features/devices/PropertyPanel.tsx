@@ -2,11 +2,13 @@
 
 import React from 'react';
 import useNetworkStore from '@/stores/useNetworkStore';
+import { useNotificationStore } from '@/stores/useNotificationStore';
 import { Device, L2Switch, L3Switch, PC } from '@/stores/types';
 import { Server, Layers, Monitor, Trash2 } from 'lucide-react';
 
 export default function PropertyPanel() {
     const { devices, selectedDeviceId, removeDevice, disconnectPort } = useNetworkStore();
+    const confirm = useNotificationStore((s) => s.confirm);
 
     const selectedDevice = devices.find((d) => d.id === selectedDeviceId);
 
@@ -19,9 +21,9 @@ export default function PropertyPanel() {
     }
 
     const handleDelete = () => {
-        if (confirm(`${selectedDevice.hostname} を削除しますか？`)) {
-            removeDevice(selectedDevice.id);
-        }
+        confirm(`${selectedDevice.hostname} を削除しますか？`).then((ok) => {
+            if (ok) removeDevice(selectedDevice.id);
+        });
     };
 
     const renderDeviceIcon = () => {
@@ -143,9 +145,9 @@ export default function PropertyPanel() {
                                 {isConnected ? (
                                     <button
                                         onClick={() => {
-                                            if (confirm(`${port.name} の接続を切断しますか？`)) {
-                                                disconnectPort(selectedDevice.id, port.id);
-                                            }
+                                            confirm(`${port.name} の接続を切断しますか？`).then((ok) => {
+                                                if (ok) disconnectPort(selectedDevice.id, port.id);
+                                            });
                                         }}
                                         className="p-1 text-slate-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity"
                                         title="接続を切断"

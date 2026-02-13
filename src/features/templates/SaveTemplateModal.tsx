@@ -1,7 +1,9 @@
+'use client';
 
 import React, { useState } from 'react';
 import { useTemplateStore } from '@/features/templates/useTemplateStore';
 import { useNetworkStore } from '@/stores/useNetworkStore';
+import { useNotificationStore } from '@/stores/useNotificationStore';
 import { NetworkTemplate } from '@/features/templates/types';
 import { Save, X } from 'lucide-react';
 
@@ -12,6 +14,7 @@ interface Props {
 export const SaveTemplateModal: React.FC<Props> = ({ onClose }) => {
     const { currentUser, saveUserTemplate } = useTemplateStore();
     const exportToJson = useNetworkStore((state) => state.exportToJson);
+    const toast = useNotificationStore((s) => s.toast);
 
     const [name, setName] = useState('');
     const [description, setDescription] = useState('');
@@ -49,11 +52,11 @@ export const SaveTemplateModal: React.FC<Props> = ({ onClose }) => {
             await saveUserTemplate(newTemplate);
             setIsSaving(false);
             onClose();
-            alert('構成を保存しました！');
+            toast('構成を保存しました！');
         } catch (error) {
             console.error(error);
             setIsSaving(false);
-            alert('保存に失敗しました。権限がないか、ネットワークエラーの可能性があります。\n(Firestoreのセキュリティルールを確認してください)');
+            toast('保存に失敗しました。権限がないか、ネットワークエラーの可能性があります。\n(Firestoreのセキュリティルールを確認してください)');
         }
     };
 

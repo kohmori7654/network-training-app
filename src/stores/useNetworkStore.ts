@@ -10,6 +10,7 @@ import {
     Position,
     Port,
     NetworkState,
+    Memo,
 } from './types';
 import { calculateSpanningTree } from '../lib/stpEngine';
 import { calculateRoutes } from '../lib/routingEngine';
@@ -215,7 +216,13 @@ const initialState = {
     connections: [] as Connection[],
     selectedDeviceId: null as string | null,
     terminalStates: {} as { [deviceId: string]: import('./types').TerminalState },
-    note: '',
+    memos: [
+        { id: 'memo1', title: 'メモ1', content: '', type: 'text', readOnly: false },
+        { id: 'memo2', title: 'メモ2', content: '', type: 'text', readOnly: false },
+        { id: 'memo3', title: 'メモ3', content: '', type: 'text', readOnly: false },
+        { id: 'json-view', title: 'JSON (Read Only)', content: '', type: 'json', readOnly: true },
+    ] as Memo[],
+    activeMemoId: 'memo1',
 };
 
 // Initialize connections and specific configs after creation (Helper to build the scenario)
@@ -703,21 +710,32 @@ export const useNetworkStore = create<NetworkStore>()(
                 return get().terminalStates[deviceId];
             },
 
-            // メモ機能
-            setNote: (note) => {
-                set({ note });
+            // メモ機能更新
+            updateMemo: (id, content) => {
+                set((state) => ({
+                    memos: state.memos.map((m) =>
+                        m.id === id ? { ...m, content } : m
+                    ),
+                }));
             },
 
-            // override exportToJson to include note
+            setActiveMemo: (id) => {
+                set({ activeMemoId: id });
+            },
+
+            // override exportToJson to include memos
             exportToJson: () => {
                 const state = get();
+                const jsonMemos = state.memos.filter(m => m.type !== 'json'); // JSONメモ自体は出力しない（再帰防止・無駄排除）
+
                 return JSON.stringify(
                     {
-                        version: '1.1', // Bump version
+                        version: '1.2', // Bump version
                         exportedAt: new Date().toISOString(),
                         devices: state.devices,
                         connections: state.connections,
-                        note: state.note, // Include note
+                        memos: jsonMemos,
+                        // note: state.note, // Deprecated
                     },
                     null,
                     2
@@ -732,6 +750,7 @@ export const useNetworkStore = create<NetworkStore>()(
                         console.error('Invalid JSON format');
                         return false;
                     }
+
                     set({
                         devices: data.devices.map((d: Device) => ({
                             ...d,
@@ -747,7 +766,13 @@ export const useNetworkStore = create<NetworkStore>()(
                         })),
                         connections: data.connections,
                         selectedDeviceId: null,
-                        note: data.note || '', // Import note
+                        memos: data.memos || [
+                            { id: 'memo1', title: 'メモ1', content: data.note || '', type: 'text', readOnly: false },
+                            { id: 'memo2', title: 'メモ2', content: '', type: 'text', readOnly: false },
+                            { id: 'memo3', title: 'メモ3', content: '', type: 'text', readOnly: false },
+                            { id: 'json-view', title: 'JSON (Read Only)', content: '', type: 'json', readOnly: true },
+                        ],
+                        activeMemoId: 'memo1',
                     });
 
                     // Recalc on import
@@ -763,12 +788,13 @@ export const useNetworkStore = create<NetworkStore>()(
         }),
         {
             name: 'network-simulator-storage',
-            version: 2, // Version up to force migration
+            version: 3, // Version up to force migration
             migrate: (persistedState: any, version: number) => {
+                let state = persistedState;
+
                 if (version < 2) {
                     // version 1 -> 2: Fix port status inconsistency
                     // 以前のバージョンで未接続なのにupになっているポートをdownに修正
-                    const state = persistedState as NetworkState;
                     if (state.devices) {
                         state.devices = state.devices.map((d: Device) => ({
                             ...d,
@@ -783,9 +809,25 @@ export const useNetworkStore = create<NetworkStore>()(
                             })
                         }));
                     }
-                    return state;
                 }
-                return persistedState as NetworkStore;
+
+                if (version < 3) {
+                    // version 2 -> 3: Migrate 'note' string to 'memos' array
+                    const noteContent = (state as any).note || '';
+                    state = {
+                        ...state,
+                        memos: [
+                            { id: 'memo1', title: 'メモ1', content: noteContent, type: 'text', readOnly: false },
+                            { id: 'memo2', title: 'メモ2', content: '', type: 'text', readOnly: false },
+                            { id: 'memo3', title: 'メモ3', content: '', type: 'text', readOnly: false },
+                            { id: 'json-view', title: 'JSON (Read Only)', content: '', type: 'json', readOnly: true },
+                        ],
+                        activeMemoId: 'memo1',
+                    };
+                    delete (state as any).note;
+                }
+
+                return state as NetworkStore;
             },
         }
     )

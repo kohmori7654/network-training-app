@@ -1,8 +1,10 @@
+'use client';
 
 import React, { useState } from 'react';
 import { useTemplateStore } from '@/features/templates/useTemplateStore';
 import { NetworkTemplate } from '@/features/templates/types';
 import { useNetworkStore } from '@/stores/useNetworkStore';
+import { useNotificationStore } from '@/stores/useNotificationStore';
 import { Play, Trash2, Lock, LogOut, X, User } from 'lucide-react';
 
 export const TemplateDashboard: React.FC = () => {
@@ -18,6 +20,7 @@ export const TemplateDashboard: React.FC = () => {
     } = useTemplateStore();
 
     const importFromJson = useNetworkStore((state) => state.importFromJson);
+    const { toast, confirm } = useNotificationStore();
 
     // Login Modal State
     const [isLoginModalOpen, setIsLoginModalOpen] = useState(false);
@@ -26,19 +29,21 @@ export const TemplateDashboard: React.FC = () => {
     const [loginError, setLoginError] = useState('');
 
     const handleLoad = (template: NetworkTemplate) => {
-        if (confirm(`テンプレート "${template.name}" を読み込みますか？\n現在のキャンバスの内容は上書きされます。`)) {
+        confirm(`テンプレート "${template.name}" を読み込みますか？\n現在のキャンバスの内容は上書きされます。`).then((ok) => {
+            if (!ok) return;
             const success = importFromJson(template.data);
             if (success) {
                 setMode('free');
             } else {
-                alert('テンプレートの読み込みに失敗しました。');
+                toast('テンプレートの読み込みに失敗しました。');
             }
-        }
+        });
     };
 
     const handleDelete = async (e: React.MouseEvent, id: string) => {
         e.stopPropagation();
-        if (confirm('本当にこのテンプレートを削除しますか？')) {
+        const ok = await confirm('本当にこのテンプレートを削除しますか？');
+        if (ok) {
             await deleteUserTemplate(id);
         }
     };
