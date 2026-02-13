@@ -3,7 +3,7 @@
  * モード遷移、コマンド登録、パイプ処理をサポート
  */
 
-import { Device, L2Switch, L3Switch, CliMode, Port, VlanInfo, Connection, EtherChannel } from '@/stores/types';
+import { Device, L2Switch, L3Switch, CliMode, Port, VlanInfo, Connection, EtherChannel, AccessList, AccessListEntry, AccessListType } from '@/stores/types';
 import { checkConnectivity } from './connectivityEngine';
 
 // コマンドコンテキスト
@@ -90,16 +90,35 @@ function getSwitch(device: Device): L2Switch | L3Switch | null {
 }
 
 function findPort(device: Device, portName: string): Port | undefined {
-    const normalizedName = portName.toLowerCase()
-        .replace(/^gi/, 'Gi')
-        .replace(/^fa/, 'Fa')
-        .replace(/^eth/, 'eth')
-        .replace(/^po(?:rt-channel)?(\d+)/, 'Po$1'); // Po1, Port-channel1 -> Po1
+    const lowerInput = portName.toLowerCase();
 
-    return device.ports.find(p =>
-        p.name.toLowerCase() === portName.toLowerCase() ||
-        p.name.toLowerCase() === normalizedName.toLowerCase()
-    );
+    // Cisco abbreviations expansion
+    const expanded = lowerInput
+        .replace(/^gi(?!gabit)/, 'gigabitethernet')
+        .replace(/^fa(?!st)/, 'fastethernet')
+        .replace(/^te(?!n)/, 'tengigabitethernet')
+        .replace(/^eth(?!hernet)/, 'ethernet')
+        .replace(/^po(?!rt-channel)/, 'port-channel');
+
+    const normalizedName = expanded
+        .replace(/^gigabitethernet/, 'GigabitEthernet')
+        .replace(/^fastethernet/, 'FastEthernet')
+        .replace(/^tengigabitethernet/, 'TenGigabitEthernet')
+        .replace(/^ethernet/, 'Ethernet')
+        .replace(/^port-channel/, 'Port-channel');
+
+    // 1. Exact match (case insensitive)
+    // 2. Normalized match (expansion of abbreviations)
+    // 3. Prefix match (if unique - optional but good)
+    return device.ports.find(p => {
+        const pLower = p.name.toLowerCase();
+        return pLower === lowerInput ||
+            pLower === expanded ||
+            pLower === normalizedName.toLowerCase() ||
+            // Handle the case where the port name in DB is already short (e.g., Gi1/0/1)
+            // but the user typed full GigabitEthernet1/0/1
+            (pLower.startsWith('gi') && lowerInput.startsWith('gigabitethernet') && pLower.slice(2) === lowerInput.slice(15));
+    });
 }
 
 function parseInterfaceRange(device: Device, rangeStr: string): Port[] {
@@ -243,6 +262,40 @@ function formatArpTable(device: L3Switch): string[] {
     }
 
     return output;
+}
+
+function isValidIp(ip: string): boolean {
+    const parts = ip.split('.');
+    if (parts.length !== 4) return false;
+    return parts.every(p => {
+        const n = parseInt(p);
+        return !isNaN(n) && n >= 0 && n <= 255;
+    });
+}
+
+function parseWildcard(str: string): string | null {
+    if (!str) return '0.0.0.0';
+    const parts = str.split('.');
+    if (parts.length !== 4) return null;
+    if (parts.some(p => isNaN(parseInt(p)) || parseInt(p) < 0 || parseInt(p) > 255)) return null;
+    return str;
+}
+
+function cidrFromMask(mask: string): number {
+    return mask.split('.').reduce((acc, part) => {
+        const bin = parseInt(part).toString(2);
+        return acc + (bin.match(/1/g) || []).length;
+    }, 0);
+}
+
+function getAdmDistance(protocol: string): number {
+    switch (protocol) {
+        case 'connected': return 0;
+        case 'static': return 1;
+        case 'bgp': return 20;
+        case 'ospf': return 110;
+        default: return 255;
+    }
 }
 
 function formatSpanningTree(device: L2Switch | L3Switch): string[] {
@@ -437,6 +490,65 @@ const commands: CommandDefinition[] = [
         modes: ['user'],
         help: '',
         handler: () => ({ output: [], newMode: 'privileged' }),
+    },
+    {
+        pattern: /^wr(?:ite)?(?:\s+mem(?:ory)?)?$/i,
+        modes: ['privileged'],
+        help: 'write memory - Save configuration',
+        handler: (_, context) => {
+            const dev = context.device as L2Switch | L3Switch; // PCにはない想定
+            if (!dev.runningConfig) return { output: ['% Not supported'] };
+
+            return {
+                output: ['Building configuration...', '[OK]'],
+                updateConfig: { startupConfig: [...dev.runningConfig] } as any
+            };
+        },
+    },
+    {
+        pattern: /^copy\s+run(?:ning-config)?\s+start(?:up-config)?$/i,
+        modes: ['privileged'],
+        help: 'copy running-config startup-config - Save configuration',
+        handler: (_, context) => {
+            const dev = context.device as L2Switch | L3Switch;
+            if (!dev.runningConfig) return { output: ['% Not supported'] };
+
+            return {
+                output: ['Destination filename [startup-config]? ', 'Building configuration...', '[OK]'],
+                updateConfig: { startupConfig: [...dev.runningConfig] } as any
+            };
+        },
+    },
+    {
+        pattern: /^reload$/i,
+        modes: ['privileged'],
+        help: 'reload - Halt and perform a cold restart',
+        handler: (_, context) => {
+            const dev = context.device as L2Switch | L3Switch;
+            // 簡易Reload: runningConfig を startupConfig で上書き
+            // 本当はインターフェース状態などもリセットすべきだが、Configに基づくものはConfig反映で直るはず
+            // ただし、ポートの物理接続状態(connectedTo / status)は維持すべきか？
+            // 本当はインターフェース状態などもリセットすべきだが、シミュレータでは接続は維持、プロトコル状態初期化
+            // ここでは「Configの復元」のみ行う
+
+            if (!dev.startupConfig) return { output: ['% Not supported'] };
+
+            return {
+                output: ['Proceed with reload? [confirm]', 'Reloading...'],
+                updateConfig: {
+                    runningConfig: [...dev.startupConfig],
+                    // Restore Hostname from startup-config
+                    ...(() => {
+                        const hostnameLine = dev.startupConfig?.find(l => l.startsWith('hostname '));
+                        if (hostnameLine) {
+                            const newHostname = hostnameLine.split(' ')[1];
+                            return { hostname: newHostname, name: newHostname };
+                        }
+                        return {};
+                    })()
+                } as any
+            };
+        },
     },
     {
         pattern: /^disable$/i,
@@ -754,27 +866,51 @@ const commands: CommandDefinition[] = [
             const sw = getSwitch(context.device);
             if (!sw) return { output: ['% Invalid device'] };
 
-            const updatedPorts = sw.ports.map(p =>
-                targetPortIds.includes(p.id) ? { ...p, status: 'up' as const } : p
-            );
+            const updatedPorts = sw.ports.map(p => {
+                if (targetPortIds.includes(p.id)) {
+                    // connectedTo (物理接続) があれば up、なければ down (admin-down解除という意味で)
+                    // シミュレータの型としては 'up' | 'down' | 'admin-down' なので、
+                    // 未接続時の no shutdown は 'down' が適切。
+                    const newStatus = p.connectedTo ? 'up' : 'down';
+                    return { ...p, status: newStatus as 'up' | 'down' };
+                }
+                return p;
+            });
 
             return { output: [], updateConfig: { ports: updatedPorts } };
         },
     },
     {
-        pattern: /^switchport\s+mode\s+(access|trunk)$/i,
+        pattern: /^switchport\s+mode\s+(access|trunk|dynamic\s+auto|dynamic\s+desirable)$/i,
         modes: ['interface-config'],
-        help: 'switchport mode access|trunk - Set interface mode',
+        help: 'switchport mode <access|trunk|dynamic> - Set interface mode',
         handler: (args, context) => {
-            const mode = args[0].toLowerCase() as 'access' | 'trunk';
+            const arg = args[0].toLowerCase(); // "access", "trunk", "dynamic auto", "dynamic desirable"
             const targetPortIds = context.selectedPortIds || (context.currentInterface ? [findPort(context.device, context.currentInterface)?.id].filter(id => id) as string[] : []);
             if (targetPortIds.length === 0) return { output: ['% No interface selected'] };
 
             const sw = getSwitch(context.device);
             if (!sw) return { output: ['% Invalid device'] };
 
+            let mode: 'access' | 'trunk' | 'dynamic' | 'routed'; // 'routed' is handled by no switchport
+            let dtpMode: 'dynamic-auto' | 'dynamic-desirable' | 'none';
+
+            if (arg === 'access') {
+                mode = 'access';
+                dtpMode = 'none';
+            } else if (arg === 'trunk') {
+                mode = 'trunk';
+                dtpMode = 'none';
+            } else if (arg.includes('auto')) {
+                mode = 'dynamic';
+                dtpMode = 'dynamic-auto';
+            } else {
+                mode = 'dynamic';
+                dtpMode = 'dynamic-desirable';
+            }
+
             const updatedPorts = sw.ports.map(p =>
-                targetPortIds.includes(p.id) ? { ...p, mode } : p
+                targetPortIds.includes(p.id) ? { ...p, mode, dtpMode } : p
             );
 
             return { output: [], updateConfig: { ports: updatedPorts } };
@@ -1244,17 +1380,33 @@ const commands: CommandDefinition[] = [
             const allVlans = sw.vlanDb.map(v => v.id).sort((a, b) => a - b);
 
             const showVlan = (vid: number) => {
-                const config = sw.stpState.vlanConfig?.[vid];
-                const pri = config?.priority ?? sw.stpState.priority; // Fallback to global
-                const rootType = config?.rootType ? `(${config.rootType})` : '';
+                // Global STP State (CST) used for all VLANs currently (Simplified)
+                // In real PVST+, we would look up per-vlan instance.
+                // Here we fallback to global stpState for the logic, but filter ports by VLAN.
+
+                const stp = sw.stpState;
+                const rootInfo = stp.rootBridgeId ? stp.rootBridgeId.split('-') : [String(stp.priority), sw.macAddress];
+                const rootPri = rootInfo[0];
+                const rootMac = rootInfo[1];
+                const rootCost = stp.rootPathCost ?? 0;
+                const rootPortName = stp.rootPortId ? sw.ports.find(p => p.id === stp.rootPortId)?.name || 'Et/0' : '';
+                const myPri = stp.priority;
+
+                const isRoot = stp.rootBridgeId === `${String(myPri).padStart(6, '0')}-${sw.macAddress}`;
 
                 output.push(`VLAN${String(vid).padStart(4, '0')}`);
                 output.push(`  Spanning tree enabled protocol ieee`);
-                output.push(`  Root ID    Priority    ${pri}`);
-                output.push(`             Address     ${sw.macAddress} (This bridge) ${rootType}`);
+                output.push(`  Root ID    Priority    ${parseInt(rootPri)}`); // Remove padding for display
+                output.push(`             Address     ${rootMac}`);
+                if (isRoot) {
+                    output.push(`             This bridge is the root`);
+                } else {
+                    output.push(`             Cost        ${rootCost}`);
+                    output.push(`             Port        ${rootPortName}`); // Should show port number/name
+                }
                 output.push(`             Hello Time   2 sec  Max Age 20 sec  Forward Delay 15 sec`);
                 output.push('');
-                output.push(`  Bridge ID  Priority    ${pri} (priority ${pri} sys-id-ext ${vid})`);
+                output.push(`  Bridge ID  Priority    ${myPri} (priority ${myPri} sys-id-ext ${vid})`);
                 output.push(`             Address     ${sw.macAddress}`);
                 output.push('');
                 output.push('Interface           Role Sts Cost      Prio.Nbr Type');
@@ -1268,8 +1420,29 @@ const commands: CommandDefinition[] = [
                     return false;
                 });
 
+                // Sort ports by name natural order
+                ports.sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+
                 for (const p of ports) {
-                    output.push(`${p.name.padEnd(19)} Desg FWD 4         128.1    P2p`);
+                    const details = stp.portDetails?.[p.id];
+                    // Map Role
+                    let roleStr = 'Desg'; // Default
+                    if (details?.role === 'root') roleStr = 'Root';
+                    else if (details?.role === 'alternate') roleStr = 'Altn';
+                    else if (details?.role === 'backup') roleStr = 'Back'; // Typos in types? "backup"
+                    else if (details?.role === 'disabled') roleStr = 'Dis ';
+
+                    // Map State
+                    let stateStr = 'FWD';
+                    if (details?.state === 'blocking') stateStr = 'BLK';
+                    else if (details?.state === 'learning') stateStr = 'LRN';
+                    else if (details?.state === 'listening') stateStr = 'LIS';
+                    else if (details?.state === 'disabled') stateStr = 'DIS';
+
+                    const cost = details?.cost ?? 19;
+                    const priNbr = `128.${p.id.substring(0, 4)}`; // Mock Prio.Nbr
+
+                    output.push(`${p.name.padEnd(19)} ${roleStr.padEnd(4)} ${stateStr} ${String(cost).padEnd(9)} ${priNbr.padEnd(8)} P2p`);
                 }
                 output.push('');
             };
@@ -1505,12 +1678,15 @@ const commands: CommandDefinition[] = [
 
     // ===== showコマンド =====
     {
-        pattern: /^sh(?:ow)?\s+ru(?:n(?:ning-config)?)?$/i,
+        pattern: /^sh(?:ow)?\s+ru(?:n(?:ning-config)?)?(?:\s+int(?:erface)?(?:\s+(.+))?)?$/i,
         modes: ['privileged', 'global-config', 'interface-config', 'vlan-config'],
-        help: 'show running-config - Display current configuration',
-        handler: (_, context) => {
+        help: 'show running-config [interface <name>] - Display current configuration',
+        handler: (args, context) => {
             const sw = getSwitch(context.device);
             if (!sw) return { output: ['% Not supported'] };
+
+            // args[0] might be the interface name if "int" or "interface" was used
+            const targetIfName = args[0]?.trim();
 
             const isL3 = context.device.type === 'l3-switch';
             const timestamp = new Date().toLocaleString('en-US', {
@@ -1518,6 +1694,51 @@ const commands: CommandDefinition[] = [
                 hour: '2-digit', minute: '2-digit', second: '2-digit', year: 'numeric'
             });
 
+            // If a specific interface is requested, we only return that section
+            if (targetIfName) {
+                const port = findPort(context.device, targetIfName);
+                if (!port) return { output: [`% Interface ${targetIfName} not found`] };
+
+                const section: string[] = [`interface ${port.name}`];
+                if (port.status === 'admin-down') section.push(' shutdown');
+
+                const isSvi = port.name.toLowerCase().startsWith('vlan');
+                if (isSvi) {
+                    if (port.ipAddress) section.push(` ip address ${port.ipAddress} ${port.subnetMask}`);
+                    else section.push(' no ip address');
+
+                    if (isL3) {
+                        const l3 = sw as L3Switch;
+                        const vid = parseInt(port.name.replace(/\D/g, ''));
+                        const hsrp = l3.hsrpGroups.filter(g => g.group === vid);
+                        for (const h of hsrp) {
+                            section.push(` standby ${h.group} ip ${h.virtualIp}`);
+                            if (h.priority !== 100) section.push(` standby ${h.group} priority ${h.priority}`);
+                            if (h.preempt) section.push(` standby ${h.group} preempt`);
+                        }
+                    }
+                } else {
+                    if (port.mode === 'routed') {
+                        section.push(' no switchport');
+                        if (port.ipAddress) section.push(` ip address ${port.ipAddress} ${port.subnetMask}`);
+                    } else if (port.mode === 'trunk') {
+                        section.push(' switchport trunk encapsulation dot1q');
+                        section.push(' switchport mode trunk');
+                        if (port.trunkAllowedVlans && port.trunkAllowedVlans.length > 0) {
+                            section.push(` switchport trunk allowed vlan ${port.trunkAllowedVlans.join(',')}`);
+                        }
+                    } else if (port.mode === 'access') {
+                        section.push(' switchport mode access');
+                        if (port.vlan && port.vlan !== 1) section.push(` switchport access vlan ${port.vlan}`);
+                    }
+                    if (port.channelGroup) section.push(` channel-group ${port.channelGroup} mode active`);
+                    section.push(' spanning-tree portfast');
+                }
+                section.push('!');
+                return { output: section };
+            }
+
+            // Normal full running-config
             const config: string[] = [
                 'Building configuration...',
                 '',
@@ -1545,7 +1766,7 @@ const commands: CommandDefinition[] = [
             if (isL3) {
                 config.push('ip routing');
                 config.push('!');
-                config.push('ip cef');
+                config.push('ip CEF'); // Using standard CEF capitalization
                 config.push('!');
             }
             config.push('no ip domain-lookup');
@@ -1575,8 +1796,6 @@ const commands: CommandDefinition[] = [
             config.push('!');
 
             // Interfaces (Physical & SVIs from ports)
-            // Sort ports: SVIs last, or by name.
-            // Helper to sort: Gi < Te < Po < Vlan
             const sortPorts = (a: any, b: any) => {
                 const typeScore = (name: string) => {
                     if (name.startsWith('Fast')) return 1;
@@ -1596,25 +1815,13 @@ const commands: CommandDefinition[] = [
 
             for (const port of sortedPorts) {
                 config.push(`interface ${port.name}`);
-
-                if (port.status === 'admin-down') {
-                    config.push(' shutdown');
-                }
+                if (port.status === 'admin-down') config.push(' shutdown');
 
                 const isSvi = port.name.toLowerCase().startsWith('vlan');
-
                 if (isSvi) {
-                    if (port.ipAddress) {
-                        config.push(` ip address ${port.ipAddress} ${port.subnetMask}`);
-                    } else if (!isL3 && (sw as L2Switch).ipDefaultGateway && port.name === 'Vlan1') {
-                        // On L2, if Vlan1 has no specific IP but potentially could. 
-                        // Usually L2 SVI IP is set on Vlan1.
-                        config.push(' no ip address');
-                    } else {
-                        config.push(' no ip address');
-                    }
+                    if (port.ipAddress) config.push(` ip address ${port.ipAddress} ${port.subnetMask}`);
+                    else config.push(' no ip address');
 
-                    // HSRP for L3
                     if (isL3) {
                         const l3 = sw as L3Switch;
                         const vid = parseInt(port.name.replace(/\D/g, ''));
@@ -1625,14 +1832,10 @@ const commands: CommandDefinition[] = [
                             if (h.preempt) config.push(` standby ${h.group} preempt`);
                         }
                     }
-
                 } else {
-                    // Physical / EtherChannel
                     if (port.mode === 'routed') {
                         config.push(' no switchport');
-                        if (port.ipAddress) {
-                            config.push(` ip address ${port.ipAddress} ${port.subnetMask}`);
-                        }
+                        if (port.ipAddress) config.push(` ip address ${port.ipAddress} ${port.subnetMask}`);
                     } else if (port.mode === 'trunk') {
                         config.push(' switchport trunk encapsulation dot1q');
                         config.push(' switchport mode trunk');
@@ -1641,15 +1844,9 @@ const commands: CommandDefinition[] = [
                         }
                     } else if (port.mode === 'access') {
                         config.push(' switchport mode access');
-                        if (port.vlan && port.vlan !== 1) {
-                            config.push(` switchport access vlan ${port.vlan}`);
-                        }
+                        if (port.vlan && port.vlan !== 1) config.push(` switchport access vlan ${port.vlan}`);
                     }
-                    // Channel Group
-                    if (port.channelGroup) {
-                        config.push(` channel-group ${port.channelGroup} mode active`);
-                    }
-                    // Portfast (simulated default for all access ports in this sim?)
+                    if (port.channelGroup) config.push(` channel-group ${port.channelGroup} mode active`);
                     config.push(' spanning-tree portfast');
                 }
                 config.push('!');
@@ -1664,20 +1861,14 @@ const commands: CommandDefinition[] = [
             if (isL3) {
                 const l3 = sw as L3Switch;
                 if (l3.routingTable.length > 0) {
-                    // Static routes
                     const staticRoutes = l3.routingTable.filter(r => r.protocol === 'static');
-                    if (staticRoutes.length > 0) {
-                        for (const route of staticRoutes) {
-                            config.push(`ip route ${route.network} ${route.mask} ${route.nextHop}`);
-                        }
-                        config.push('!');
+                    for (const route of staticRoutes) {
+                        config.push(`ip route ${route.network} ${route.mask} ${route.nextHop}`);
                     }
+                    config.push('!');
                 }
-
-                // OSPF / BGP Config stubs (if they existed in types, we'd add them here)
                 if (l3.ospfConfig) {
                     config.push(`router ospf ${l3.ospfConfig.processId}`);
-                    // router-id is not currently in type definition
                     for (const net of l3.ospfConfig.networks) {
                         config.push(` network ${net.network} ${net.wildcard} area ${net.area}`);
                     }
@@ -1825,6 +2016,10 @@ const commands: CommandDefinition[] = [
                     output.push(`${code}        ${network} [1/0] via ${route.nextHop}`);
                 } else if (route.protocol === 'connected') {
                     output.push(`${code}        ${network} is directly connected, ${route.interface}`);
+                } else if (route.protocol === 'ospf') {
+                    output.push(`${code}        ${network} [110/${route.metric}] via ${route.nextHop}, ${route.interface}`);
+                } else if (route.protocol === 'bgp') {
+                    output.push(`${code}        ${network} [20/${route.metric}] via ${route.nextHop}, ${route.interface}`);
                 }
             }
 
@@ -1872,6 +2067,63 @@ const commands: CommandDefinition[] = [
             const sw = getSwitch(context.device);
             if (!sw) return { output: ['% Not supported'] };
             return { output: formatMacAddressTable(sw) };
+        },
+    },
+    {
+        pattern: /^sh(?:ow)?\s+cdp\s+nei(?:ghbors)?$/i,
+        modes: ['privileged', 'global-config'],
+        help: 'show cdp neighbors - Display CDP neighbors',
+        handler: (_, context) => {
+            const myDev = context.device;
+            const conns = context.allConnections.filter(c =>
+                (c.sourceDeviceId === myDev.id && c.status === 'up') ||
+                (c.targetDeviceId === myDev.id && c.status === 'up')
+            );
+
+            if (conns.length === 0) {
+                return { output: [] };
+            }
+
+            const output: string[] = [
+                `Capability Codes: R - Router, T - Trans Bridge, B - Source Route Bridge`,
+                `                  S - Switch, H - Host, I - IGMP, r - Repeater, P - Phone`,
+                `                  D - Remote, C - CVTA, M - Two-port Mac Relay`,
+                ``,
+                `Device ID        Local Intrfce     Holdtme    Capability  Platform  Port ID`,
+            ];
+
+            for (const c of conns) {
+                const isSource = c.sourceDeviceId === myDev.id;
+                const neighborId = isSource ? c.targetDeviceId : c.sourceDeviceId;
+                const myPortId = isSource ? c.sourcePortId : c.targetPortId;
+                const neighborPortId = isSource ? c.targetPortId : c.sourcePortId;
+
+                const neighbor = context.allDevices.find(d => d.id === neighborId);
+                const myPort = myDev.ports.find(p => p.id === myPortId);
+                const neighborPort = neighbor?.ports.find(p => p.id === neighborPortId);
+
+                if (neighbor && myPort && neighborPort) {
+                    const devId = neighbor.hostname;
+                    // Format interface names to short (Gig 1/0/1)
+                    const localInt = myPort.name.replace('Gi1/0/', 'Gig 1/0/').replace('Fa1/0/', 'Fas 1/0/');
+                    const holdTime = '120';
+
+                    let caps = '';
+                    if (neighbor.type === 'l3-switch') caps = 'R S I';
+                    else if (neighbor.type === 'l2-switch') caps = 'S I';
+                    else if (neighbor.type === 'pc') caps = 'H';
+
+                    const platform = neighbor.type === 'l3-switch' ? 'C3750' : (neighbor.type === 'l2-switch' ? 'C2960' : 'Linux');
+                    const portId = neighborPort.name.replace('Gi1/0/', 'Gig 1/0/').replace('Fa1/0/', 'Fas 1/0/');
+
+                    // Pad logic
+                    // DeviceID (17) LocalInt (14) Hold (10) Cap (10) Plat (9) Port
+                    const line = `${devId.padEnd(16)} ${localInt.padEnd(13)} ${holdTime.padEnd(9)} ${caps.padEnd(9)} ${platform.padEnd(9)} ${portId}`;
+                    output.push(line);
+                }
+            }
+            output.push('');
+            return { output };
         },
     },
     {
@@ -2348,7 +2600,7 @@ const commands: CommandDefinition[] = [
             }
 
             const targetIp = args[0];
-            const result = checkConnectivity(
+            let result = checkConnectivity(
                 context.allDevices,
                 context.allConnections,
                 context.device.id,
@@ -2357,19 +2609,45 @@ const commands: CommandDefinition[] = [
 
             const output = ['Type escape sequence to abort.', `Sending 5, 100-byte ICMP Echos to ${targetIp}, timeout is 2 seconds:`];
 
-            // Cisco風の出力 (! = 成功, . = 失敗)
-            const marks = result.rtt.map(() => '!').join('');
-            const failures = Array(5 - result.rtt.length).fill('.').join('');
-            output.push(marks + failures);
+            let updateConfig = undefined;
+            let displayRtt: number[] = result.rtt;
+            let displayString = '';
 
-            const successRate = (result.rtt.length / 5) * 100;
-            const min = result.rtt.length > 0 ? Math.min(...result.rtt) : 0;
-            const avg = result.rtt.length > 0 ? Math.floor(result.rtt.reduce((a, b) => a + b, 0) / result.rtt.length) : 0;
-            const max = result.rtt.length > 0 ? Math.max(...result.rtt) : 0;
+            // ARP Miss Handling (Simulate .!!!!)
+            if (result.arpUpdates && result.arpUpdates.length > 0 && context.device.type === 'l3-switch') {
+                const l3 = context.device as L3Switch;
+                const newEntries = result.arpUpdates.map(u => u.entry);
+                // Filter duplicates
+                const mergedArp = [...l3.arpTable];
+                for (const entry of newEntries) {
+                    if (!mergedArp.some(e => e.ipAddress === entry.ipAddress)) {
+                        mergedArp.push(entry);
+                    }
+                }
+                updateConfig = { arpTable: mergedArp };
 
-            output.push(`Success rate is ${successRate} percent (${result.rtt.length}/5), round-trip min/avg/max = ${min}/${avg}/${max} ms`);
+                // Simulate 1 drop, 4 success
+                displayString = '.!!!!';
+                displayRtt = [2, 2, 2, 2]; // Fake values
+            } else {
+                // Normal
+                const marks = result.rtt.map(() => '!').join('');
+                const failures = Array(5 - result.rtt.length).fill('.').join('');
+                displayString = marks + failures;
+            }
 
-            return { output };
+            output.push(displayString);
+
+            const total = 5;
+            const successCount = displayRtt.length;
+            const successRate = (successCount / total) * 100;
+            const min = successCount > 0 ? Math.min(...displayRtt) : 0;
+            const avg = successCount > 0 ? Math.floor(displayRtt.reduce((a, b) => a + b, 0) / successCount) : 0;
+            const max = successCount > 0 ? Math.max(...displayRtt) : 0;
+
+            output.push(`Success rate is ${successRate} percent (${successCount}/${total}), round-trip min/avg/max = ${min}/${avg}/${max} ms`);
+
+            return { output, updateConfig: updateConfig as any };
         },
     },
 
@@ -2673,6 +2951,300 @@ const commands: CommandDefinition[] = [
         }
     },
 
+
+
+    // ===== Routing Commands =====
+    {
+        pattern: /^show\s+ip\s+route$/i,
+        modes: ['privileged', 'global-config'],
+        help: 'show ip route - Display the specific IP routing table',
+        handler: (_, context) => {
+            const device = context.device;
+            if (device.type !== 'l3-switch') {
+                return { output: ['% IP routing not supported'] };
+            }
+            const l3 = device as L3Switch;
+            const output: string[] = [];
+
+            output.push('Codes: C - connected, S - static, R - RIP, M - mobile, B - BGP');
+            output.push('       D - EIGRP, EX - EIGRP external, O - OSPF, IA - OSPF inter area');
+            output.push('       N1 - OSPF NSSA external type 1, N2 - OSPF NSSA external type 2');
+            output.push('       E1 - OSPF external type 1, E2 - OSPF external type 2');
+            output.push('');
+            const defaultRoute = l3.routingTable.find(r => r.network === '0.0.0.0' && r.mask === '0.0.0.0');
+            output.push(`Gateway of last resort is ${defaultRoute ? defaultRoute.nextHop : 'not set'}`);
+            output.push('');
+
+            if (!l3.routingTable || l3.routingTable.length === 0) {
+                return { output };
+            }
+
+            for (const route of l3.routingTable) {
+                let code = 'C';
+                if (route.protocol === 'static') code = 'S';
+                else if (route.protocol === 'ospf') code = 'O';
+                else if (route.protocol === 'bgp') code = 'B';
+
+                const network = `${route.network}/${cidrFromMask(route.mask)}`;
+                let line = `${code.padEnd(4)} ${network}`;
+
+                if (route.protocol === 'connected') {
+                    line += ` is directly connected, ${route.interface}`;
+                } else {
+                    line += ` [${getAdmDistance(route.protocol)}/${route.metric}] via ${route.nextHop}`;
+                    if (route.interface) line += `, ${route.interface}`;
+                }
+                output.push(line);
+            }
+
+            return { output };
+        }
+    },
+
+    // ===== ACL Commands =====
+    {
+        pattern: /^access-list\s+(\d+)\s+(permit|deny)\s+(\S+)(?:\s+(\S+))?$/i,
+        modes: ['global-config'],
+        help: 'access-list <1-99> <permit|deny> <source> [wildcard] - Configure Standard ACL',
+        handler: (args, context) => {
+            const id = parseInt(args[0]);
+            const action = args[1].toLowerCase() as 'permit' | 'deny';
+            const sourceIp = args[2];
+            const sourceWildcard = args[3] ? parseWildcard(args[3]) : '0.0.0.0';
+
+            if (isNaN(id) || id < 1 || id > 99) {
+                // Try parsing as extended if user made a mistake, but strictly this pattern is for standard args?
+                // Actually this regex only captures 4 args. Extended has more.
+                // If ID is 100+, we should probably reject here or let the catch-all regex handle it.
+                // But regex ordering matters. Let's return error here.
+                if (id >= 100 && id <= 199) return { output: ['% Use extended syntax for extended ACLs'] };
+                return { output: ['% Invalid access list number (1-99)'] };
+            }
+            if (!isValidIp(sourceIp) && sourceIp.toLowerCase() !== 'any') {
+                return { output: ['% Invalid source IP'] };
+            }
+            if (!sourceWildcard && sourceIp.toLowerCase() !== 'any') {
+                return { output: ['% Invalid wildcard mask'] };
+            }
+
+            const sw = context.device;
+            // Support L3 features on L2 switch? Usually no for ACLs unless L3-lite.
+            if (sw.type === 'l2-switch') return { output: ['% Command not supported on L2 Switch'] };
+            const l3sw = sw as L3Switch;
+
+            const newEntry: AccessListEntry = {
+                sequence: 10,
+                action,
+                sourceIp: sourceIp.toLowerCase() === 'any' ? '0.0.0.0' : sourceIp,
+                sourceWildcard: sourceIp.toLowerCase() === 'any' ? '255.255.255.255' : sourceWildcard!
+            };
+
+            const existingAcl = l3sw.accessLists?.find(a => a.id === id);
+            let newAcls = l3sw.accessLists || [];
+
+            if (existingAcl) {
+                if (existingAcl.type !== 'standard') return { output: [`% ACL ${id} exists but is not standard`] };
+                const maxSeq = existingAcl.entries.length > 0 ? Math.max(...existingAcl.entries.map(e => e.sequence)) : 0;
+                newEntry.sequence = maxSeq + 10;
+                const updatedAcl = { ...existingAcl, entries: [...existingAcl.entries, newEntry] };
+                newAcls = newAcls.map(a => a.id === id ? updatedAcl : a);
+            } else {
+                newAcls = [...newAcls, { id, type: 'standard', entries: [newEntry] }];
+            }
+
+            return { output: [], updateConfig: { accessLists: newAcls } };
+        }
+    },
+    {
+        // Extended ACL / Catch-all for complex Standard
+        pattern: /^access-list\s+(\d+)\s+(.+)$/i,
+        modes: ['global-config'],
+        help: 'access-list <100-199> <permit|deny> <protocol> <src> <dst> ... - Configure Extended ACL',
+        handler: (args, context) => {
+            const id = parseInt(args[0]);
+            if (isNaN(id)) return { output: ['% Invalid ACL ID'] };
+
+            // If it matched the previous regex (Standard), it wouldn't be here.
+            // So if it's 1-99 here, it means the syntax was wrong for Standard OR it was complex Standard?
+            // Cisco Standard ACL is very simple.
+            if (id < 100 || id > 199) {
+                return { output: ['% Invalid access list number or syntax'] };
+            }
+
+            const rest = args[1];
+            const parts = rest.split(/\s+/);
+
+            // Minimal length: permit ip any any (4)
+            if (parts.length < 4) return { output: ['% Incomplete command'] };
+
+            const action = parts[0].toLowerCase();
+            if (action !== 'permit' && action !== 'deny') return { output: ['% Invalid action'] };
+
+            const protocol = parts[1].toLowerCase();
+            if (!['ip', 'tcp', 'udp', 'icmp'].includes(protocol)) return { output: ['% Invalid protocol'] };
+
+            let idx = 2;
+
+            // Helper to parse IP/Wildcard
+            const parseIpArg = (): { ip: string, wild: string } | null => {
+                if (idx >= parts.length) return null;
+                const p = parts[idx];
+                if (p.toLowerCase() === 'host') {
+                    idx += 2;
+                    return { ip: parts[idx - 1], wild: '0.0.0.0' };
+                }
+                if (p.toLowerCase() === 'any') {
+                    idx += 1;
+                    return { ip: '0.0.0.0', wild: '255.255.255.255' };
+                }
+                if (isValidIp(p)) {
+                    idx += 2;
+                    return { ip: p, wild: parts[idx - 1] || '0.0.0.0' }; // Cisco requires wildcard for extended usually
+                }
+                return null;
+            };
+
+            const src = parseIpArg();
+            if (!src) return { output: ['% Invalid source'] };
+
+            const dst = parseIpArg();
+            if (!dst) return { output: ['% Invalid destination'] };
+
+            // Ports
+            let dstPortOp: 'eq' | 'lt' | 'gt' | 'range' | undefined = undefined;
+            let dstPort: number | undefined = undefined;
+
+            if (idx < parts.length) {
+                if (['eq', 'lt', 'gt'].includes(parts[idx])) {
+                    dstPortOp = parts[idx] as any;
+                    dstPort = parseInt(parts[idx + 1]);
+                    if (isNaN(dstPort)) return { output: ['% Invalid port'] };
+                    idx += 2;
+                }
+            }
+
+            const sw = context.device;
+            if (sw.type === 'l2-switch') return { output: ['% Command not supported on L2 Switch'] };
+            const l3sw = sw as L3Switch;
+
+            const newEntry: AccessListEntry = {
+                sequence: 10,
+                action: action as 'permit' | 'deny',
+                protocol: protocol as any,
+                sourceIp: src.ip,
+                sourceWildcard: src.wild,
+                destinationIp: dst.ip,
+                destinationWildcard: dst.wild,
+                dstPortOperator: dstPortOp,
+                dstPort: dstPort
+            };
+
+            const existingAcl = l3sw.accessLists?.find(a => a.id === id);
+            let newAcls = l3sw.accessLists || [];
+
+            if (existingAcl) {
+                if (existingAcl.type !== 'extended') return { output: [`% ACL ${id} exists but is not extended`] };
+                const maxSeq = existingAcl.entries.length > 0 ? Math.max(...existingAcl.entries.map(e => e.sequence)) : 0;
+                newEntry.sequence = maxSeq + 10;
+                const updatedAcl = { ...existingAcl, entries: [...existingAcl.entries, newEntry] };
+                newAcls = newAcls.map(a => a.id === id ? updatedAcl : a);
+            } else {
+                newAcls = [...newAcls, { id, type: 'extended', entries: [newEntry] }];
+            }
+
+            return { output: [], updateConfig: { accessLists: newAcls } };
+        }
+    },
+    {
+        pattern: /^ip\s+access-group\s+(\d+)\s+(in|out)$/i,
+        modes: ['interface-config'],
+        help: 'ip access-group <id> <in|out> - Apply ACL to interface',
+        handler: (args, context) => {
+            const id = parseInt(args[0]);
+            const direction = args[1].toLowerCase();
+            const sw = context.device;
+            const ifName = context.currentInterface;
+            if (!ifName) return { output: ['% No interface selected'] };
+
+            const updatedPorts = sw.ports.map(p => {
+                if (p.name === ifName) {
+                    if (direction === 'in') return { ...p, accessGroupIn: id };
+                    else return { ...p, accessGroupOut: id };
+                }
+                return p;
+            });
+
+            return { output: [], updateConfig: { ports: updatedPorts } };
+        }
+    },
+    {
+        pattern: /^no\s+ip\s+access-group\s+(\d+)\s+(in|out)$/i,
+        modes: ['interface-config'],
+        help: 'no ip access-group <id> <in|out> - Remove ACL from interface',
+        handler: (args, context) => {
+            const id = parseInt(args[0]);
+            const direction = args[1].toLowerCase();
+            const sw = context.device;
+            const ifName = context.currentInterface;
+            if (!ifName) return { output: ['% No interface selected'] };
+
+            const updatedPorts = sw.ports.map(p => {
+                if (p.name === ifName) {
+                    // Only remove if it matches ID? Cisco usually requires matching.
+                    if (direction === 'in' && p.accessGroupIn === id) return { ...p, accessGroupIn: undefined };
+                    if (direction === 'out' && p.accessGroupOut === id) return { ...p, accessGroupOut: undefined };
+                }
+                return p;
+            });
+            return { output: [], updateConfig: { ports: updatedPorts } };
+        }
+    },
+    {
+        pattern: /^show\s+access-lists(?:\s+(\d+))?$/i,
+        modes: ['privileged', 'global-config', 'user'],
+        help: 'show access-lists [id] - List access lists',
+        handler: (args, context) => {
+            const sw = context.device;
+            const l3sw = sw as L3Switch; // Or L2 with L3 features
+            if (!('accessLists' in l3sw) || !l3sw.accessLists) return { output: [] };
+
+            const id = args[0] ? parseInt(args[0]) : undefined;
+            const output: string[] = [];
+
+            for (const acl of l3sw.accessLists) {
+                if (id && acl.id !== id) continue;
+                output.push(`${acl.type === 'standard' ? 'Standard' : 'Extended'} IP access list ${acl.id}`);
+                for (const entry of acl.entries) {
+                    let line = `    ${entry.sequence} ${entry.action}`;
+                    if (acl.type === 'standard') {
+                        if (entry.sourceIp === '0.0.0.0' && entry.sourceWildcard === '255.255.255.255') {
+                            line += ` any`;
+                        } else if (entry.sourceWildcard === '0.0.0.0') {
+                            line += ` host ${entry.sourceIp}`;
+                        } else {
+                            line += ` ${entry.sourceIp}, wildcard bits ${entry.sourceWildcard}`;
+                        }
+                    } else {
+                        line += ` ${entry.protocol}`;
+                        // Src
+                        if (entry.sourceIp === '0.0.0.0' && entry.sourceWildcard === '255.255.255.255') line += ` any`;
+                        else if (entry.sourceWildcard === '0.0.0.0') line += ` host ${entry.sourceIp}`;
+                        else line += ` ${entry.sourceIp} ${entry.sourceWildcard}`;
+
+                        // Dst
+                        if (entry.destinationIp === '0.0.0.0' && entry.destinationWildcard === '255.255.255.255') line += ` any`;
+                        else if (entry.destinationWildcard === '0.0.0.0') line += ` host ${entry.destinationIp}`;
+                        else line += ` ${entry.destinationIp} ${entry.destinationWildcard}`;
+
+                        if (entry.dstPortOperator) line += ` ${entry.dstPortOperator} ${entry.dstPort}`;
+                    }
+                    output.push(line);
+                }
+            }
+            return { output };
+        }
+    },
+
 ];
 
 // ========== メイン処理関数 ==========
@@ -2733,345 +3305,314 @@ export function getCliPrompt(hostname: string, mode: CliMode, currentInterface?:
     }
 }
 
-// コマンド補完用：現在のモードで利用可能なコマンドのプレフィックスを取得
-export function getCommandCompletions(partialInput: string, mode: CliMode): string[] {
-    const normalizedInput = partialInput.toLowerCase().trim();
+// コマンドツリーの型定義
+interface CommandTreeNode {
+    [key: string]: CommandTreeNode | string[] | ((device: Device) => string[]) | null;
+}
 
-    // コマンド階層構造
-    const commandTree: { [key in CliMode]: { [key: string]: string[] | null } } = {
-        'user': {
-            'enable': null,
-            'exit': null,
-            'show': ['running-config', 'version', 'vlan', 'interfaces', 'ip', 'mac', 'arp', 'standby', 'etherchannel'],
-            'ping': null,
+// コマンドの説明（共通）
+const commandDescriptions: Record<string, string> = {
+    'enable': 'Turn on privileged commands',
+    'disable': 'Turn off privileged commands',
+    'exit': 'Exit from the current mode',
+    'end': 'Return to privileged EXEC mode',
+    'show': 'Show running system information',
+    'configure': 'Enter configuration mode',
+    'ping': 'Send echo messages',
+    'copy': 'Copy configuration or image data',
+    'write': 'Write running configuration to memory',
+    'reload': 'Halt and perform a warm restart',
+    'clear': 'Reset functions',
+    'hostname': 'Set system hostname',
+    'interface': 'Select an interface to configure',
+    'vlan': 'VLAN commands',
+    'no': 'Negate a command or set its defaults',
+    'ip': 'Global IP configuration subcommands',
+    'spanning-tree': 'Spanning Tree configuration',
+    'line': 'Configure a terminal line',
+    'switchport': 'Set switching mode characteristics',
+    'shutdown': 'Shutdown the selected interface',
+    'description': 'Interface specific description',
+    'standby': 'HSRP configuration',
+    'name': 'Specify VLAN name',
+    'state': 'Operational state of the VLAN',
+    'terminal': 'Configure from the terminal',
+    'running-config': 'Current operating configuration',
+    'startup-config': 'Contents of startup configuration',
+    'version': 'System hardware and software status',
+    'interfaces': 'Interface status and configuration',
+    'arp': 'ARP table',
+    'mac': 'MAC functions',
+    'etherchannel': 'EtherChannel information',
+    'address': 'Set the IP address of an interface',
+    'route': 'Establish static routes',
+    'routing': 'Enable IP routing',
+    'mode': 'Set trunking mode of the interface',
+    'access': 'Set access mode characteristics of the interface',
+    '<cr>': '',
+};
+
+// 階層的なコマンドツリー
+const commandTree: Record<CliMode, CommandTreeNode> = {
+    'user': {
+        'enable': null,
+        'exit': null,
+        'show': {
+            'running-config': {
+                'interface': (device: Device) => device.ports.map(p => p.name),
+            },
+            'version': null,
+            'vlan': ['brief'],
+            'interfaces': ['description', 'trunk'],
+            'ip': ['interface', 'route'],
+            'mac': ['address-table'],
+            'arp': null,
+            'standby': ['brief'],
+            'etherchannel': ['summary'],
         },
-        'privileged': {
-            'configure': ['terminal'],
-            'disable': null,
-            'exit': null,
-            'show': ['running-config', 'startup-config', 'version', 'vlan', 'interfaces', 'ip', 'mac', 'arp', 'standby', 'etherchannel'],
-            'ping': null,
-            'copy': ['running-config', 'startup-config'],
-            'write': ['memory'],
-            'reload': null,
-            'clear': ['mac', 'arp'],
+        'ping': null,
+    },
+    'privileged': {
+        'configure': { 'terminal': null },
+        'disable': null,
+        'exit': null,
+        'show': {
+            'running-config': {
+                'interface': (device: Device) => device.ports.map(p => p.name),
+            },
+            'startup-config': null,
+            'version': null,
+            'vlan': ['brief'],
+            'interfaces': ['description', 'trunk'],
+            'ip': ['interface', 'route'],
+            'mac': ['address-table'],
+            'arp': null,
+            'standby': ['brief'],
+            'etherchannel': ['summary'],
+            'spanning-tree': ['vlan'],
         },
-        'global-config': {
-            'hostname': null,
-            'interface': ['Gi1/0/1', 'Gi1/0/2', 'Gi1/0/3', 'Vlan1', 'Vlan10'],
+        'ping': null,
+        'copy': ['running-config', 'startup-config'],
+        'write': ['memory'],
+        'reload': null,
+        'clear': ['mac', 'arp'],
+    },
+    'global-config': {
+        'hostname': null,
+        'interface': {
+            'Gi1/0/': (device: Device) => device.ports.filter(p => !p.name.startsWith('Vlan')).map(p => p.name),
+            'Vlan': (device: Device) => device.ports.filter(p => p.name.startsWith('Vlan')).map(p => p.name),
+            'range': null,
+        },
+        'vlan': null,
+        'no': {
             'vlan': null,
-            'no': ['vlan', 'ip', 'hostname'],
-            'end': null,
-            'exit': null,
-            'ip': ['routing', 'route'],
-            'spanning-tree': ['mode', 'vlan'],
-            'show': ['running-config', 'version', 'vlan', 'interfaces', 'ip', 'mac', 'standby', 'spanning-tree'],
+            'ip': { 'routing': null, 'route': null },
+            'hostname': null,
         },
-        'interface-config': {
-            'switchport': ['mode', 'access'],
+        'ip': {
+            'routing': null,
+            'route': null,
+            'default-gateway': null,
+        },
+        'spanning-tree': {
+            'mode': ['pvst', 'rapid-pvst'],
+            'vlan': null,
+        },
+        'line': { 'console': ['0'], 'vty': null },
+        'end': null,
+        'exit': null,
+        'show': {
+            'running-config': {
+                'interface': (device: Device) => device.ports.map(p => p.name),
+            },
+        },
+    },
+    'interface-config': {
+        'switchport': {
+            'mode': ['access', 'trunk'],
+            'access': { 'vlan': null },
+            'trunk': { 'allowed': { 'vlan': null } },
+        },
+        'shutdown': null,
+        'no': {
             'shutdown': null,
-            'no': ['shutdown', 'switchport', 'ip'],
-            'description': null,
-            'ip': ['address'],
-            'standby': null,
-            'end': null,
-            'exit': null,
-            'show': ['running-config', 'interfaces'],
+            'switchport': null,
+            'ip': { 'address': null },
         },
-        'vlan-config': {
-            'name': null,
-            'state': ['active', 'suspend'],
-            'no': ['name', 'state'],
-            'end': null,
-            'exit': null,
+        'description': null,
+        'ip': { 'address': null },
+        'standby': {
+            'priority': null,
+            'preempt': null,
+            'ip': null,
         },
-        'router-ospf-config': {
-            'network': null,
-            'redistribute': ['bgp', 'connected', 'static'],
-            'end': null,
-            'exit': null,
-            'no': ['network', 'redistribute'],
-        },
-        'router-bgp-config': {
-            'network': null,
-            'neighbor': null,
-            'redistribute': ['ospf', 'connected', 'static'],
-            'end': null,
-            'exit': null,
-            'no': ['network', 'neighbor', 'redistribute'],
-        },
-        'line-config': {
-            'password': null,
-            'login': null,
-            'exit': null,
-            'end': null,
-            'no': ['password', 'login'],
-        },
-    };
+        'channel-group': null,
+        'spanning-tree': ['portfast'],
+        'end': null,
+        'exit': null,
+    },
+    'vlan-config': {
+        'name': null,
+        'state': ['active', 'suspend'],
+        'no': ['name', 'state'],
+        'end': null,
+        'exit': null,
+    },
+    'router-ospf-config': {
+        'network': null,
+        'redistribute': ['bgp', 'connected', 'static'],
+        'end': null,
+        'exit': null,
+        'no': ['network', 'redistribute'],
+    },
+    'router-bgp-config': {
+        'network': null,
+        'neighbor': null,
+        'redistribute': ['ospf', 'connected', 'static'],
+        'end': null,
+        'exit': null,
+        'no': ['network', 'neighbor', 'redistribute'],
+    },
+    'line-config': {
+        'password': null,
+        'login': null,
+        'exit': null,
+        'end': null,
+        'no': ['password', 'login'],
+    },
+};
 
+// 短縮コマンドの解決（前方一致で一意に決まる場合のみ）
+function resolveShortWord(words: string[], tree: CommandTreeNode): string[] {
+    let currentNode: any = tree;
+    const resolved: string[] = [];
+
+    for (let i = 0; i < words.length; i++) {
+        const word = words[i].toLowerCase();
+        const candidates = Object.keys(currentNode || {}).filter(k => k.startsWith(word));
+
+        if (candidates.length === 1) {
+            const canonical = candidates[0];
+            resolved.push(canonical);
+            const next = currentNode[canonical];
+            if (next && typeof next === 'object' && !Array.isArray(next)) {
+                currentNode = next;
+            } else {
+                // Leaf reached but more words provided (maybe args)
+                currentNode = null;
+            }
+        } else {
+            // Unresolved or ambiguous
+            resolved.push(words[i]);
+            currentNode = null;
+        }
+    }
+    return resolved;
+}
+
+// 単語リストに基づいてノードを取得
+function getTargetNode(words: string[], tree: CommandTreeNode, device: Device): any {
+    let currentNode: any = tree;
+
+    for (let i = 0; i < words.length; i++) {
+        const word = words[i].toLowerCase();
+        if (!currentNode) return null;
+
+        // 候補から完全一致または前方一致を探す
+        const keys = Object.keys(currentNode);
+        const match = keys.find(k => k === word) || keys.find(k => k.startsWith(word));
+
+        if (match) {
+            const next = currentNode[match];
+            if (typeof next === 'function') {
+                // Dynamic candidates (leaf)
+                return next(device);
+            }
+            currentNode = next;
+        } else {
+            return null;
+        }
+    }
+    return currentNode;
+}
+
+// コマンド補完
+export function getCommandCompletions(partialInput: string, mode: CliMode, device: Device): string[] {
+    const inputWords = partialInput.toLowerCase().split(/\s+/).filter(w => w);
+    const endsWithSpace = partialInput.endsWith(' ');
     const tree = commandTree[mode] || {};
-    const inputWords = normalizedInput.split(/\s+/).filter(w => w);
 
-    // 入力が空の場合はトップレベルコマンド一覧
     if (inputWords.length === 0) {
         return Object.keys(tree);
     }
 
-    // 最後のスペースで終わるかどうか
-    const endsWithSpace = partialInput.endsWith(' ');
+    if (!endsWithSpace) {
+        // 最後の単語の補完
+        const prefixWords = inputWords.slice(0, -1);
+        const lastWord = inputWords[inputWords.length - 1];
+        const targetNode = prefixWords.length === 0 ? tree : getTargetNode(prefixWords, tree, device);
 
-    // 短縮コマンドを正規コマンドに変換する関数
-    const resolveShortCommand = (short: string): string | null => {
-        const matches = Object.keys(tree).filter(cmd => cmd.startsWith(short));
-        if (matches.length === 1) {
-            return matches[0];
-        }
-        return null;
-    };
+        if (!targetNode) return [];
 
-    if (inputWords.length === 1 && !endsWithSpace) {
-        // 1単語で補完中 → 前方一致
-        const partial = inputWords[0];
-        return Object.keys(tree).filter(cmd => cmd.startsWith(partial));
-    }
+        const candidates = Array.isArray(targetNode) ? targetNode : Object.keys(targetNode);
+        return candidates.filter(c => c.toLowerCase().startsWith(lastWord));
+    } else {
+        // 次の単語/候補の提示
+        const targetNode = getTargetNode(inputWords, tree, device);
+        if (!targetNode) return [];
 
-    // 複数単語またはスペース終わり
-    let firstWord = inputWords[0];
-
-    // 短縮コマンドを解決
-    const resolved = resolveShortCommand(firstWord);
-    if (resolved) {
-        firstWord = resolved;
-    }
-
-    const subCommands = tree[firstWord];
-
-    if (!subCommands) {
-        // サブコマンドがないコマンド
-        if (endsWithSpace && (Object.keys(tree).includes(firstWord) || resolved)) {
-            return ['<cr>'];
-        }
-        return [];
-    }
-
-    if (inputWords.length === 1 && endsWithSpace) {
-        // 'show ' や 'sh ' のようにスペースで終わっている場合
-        return subCommands;
-    }
-
-    if (inputWords.length === 2 && !endsWithSpace) {
-        // 'show ver' や 'sh ver' のような途中入力
-        const partial = inputWords[1];
-        return subCommands.filter(sub => sub.toLowerCase().startsWith(partial));
-    }
-
-    if (inputWords.length === 2 && endsWithSpace) {
-        // 'show version ' のようにスペースで終わっている
+        if (Array.isArray(targetNode)) return targetNode;
+        if (typeof targetNode === 'object') return Object.keys(targetNode);
         return ['<cr>'];
     }
-
-    return [];
 }
 
-// コマンドヘルプ（?を押したとき用）- Cisco IOS形式
-export function getCommandHelp(partialInput: string, mode: CliMode): string[] {
-    const normalizedInput = partialInput.toLowerCase().trim();
+// コマンドヘルプ
+export function getCommandHelp(partialInput: string, mode: CliMode, device: Device): string[] {
+    const inputWords = partialInput.toLowerCase().split(/\s+/).filter(w => w);
+    const endsWithSpace = partialInput.endsWith(' ');
+    const tree = commandTree[mode] || {};
     const helpLines: string[] = [''];
 
-    // コマンドの説明
-    const commandDescriptions: { [key: string]: string } = {
-        'enable': 'Turn on privileged commands',
-        'disable': 'Turn off privileged commands',
-        'exit': 'Exit from the current mode',
-        'end': 'Return to privileged EXEC mode',
-        'show': 'Show running system information',
-        'configure': 'Enter configuration mode',
-        'ping': 'Send echo messages',
-        'copy': 'Copy configuration or image data',
-        'write': 'Write running configuration to memory',
-        'reload': 'Halt and perform a warm restart',
-        'clear': 'Reset functions',
-        'hostname': 'Set system hostname',
-        'interface': 'Select an interface to configure',
-        'vlan': 'VLAN commands',
-        'no': 'Negate a command or set its defaults',
-        'ip': 'Global IP configuration subcommands',
-        'spanning-tree': 'Spanning Tree configuration',
-        'line': 'Configure a terminal line',
-        'switchport': 'Set switching mode characteristics',
-        'shutdown': 'Shutdown the selected interface',
-        'description': 'Interface specific description',
-        'standby': 'HSRP configuration',
-        'name': 'Specify VLAN name',
-        'state': 'Operational state of the VLAN',
-        'terminal': 'Configure from the terminal',
-        'running-config': 'Current operating configuration',
-        'startup-config': 'Contents of startup configuration',
-        'version': 'System hardware and software status',
-        'interfaces': 'Interface status and configuration',
-        'arp': 'ARP table',
-        'mac': 'MAC functions',
-        'etherchannel': 'EtherChannel information',
-        '<cr>': '',
-    };
+    let targetCandidates: string[] = [];
+    let isLeaf = false;
 
-    // コマンドのオプション（引数）情報
-    const commandOptions: { [key: string]: { option: string; desc: string }[] } = {
-        'enable': [
-            { option: '<cr>', desc: '' },
-        ],
-        'disable': [
-            { option: '<cr>', desc: '' },
-        ],
-        'exit': [
-            { option: '<cr>', desc: '' },
-        ],
-        'end': [
-            { option: '<cr>', desc: '' },
-        ],
-        'show': [
-            { option: 'arp', desc: 'ARP table' },
-            { option: 'etherchannel', desc: 'EtherChannel information' },
-            { option: 'interfaces', desc: 'Interface status and configuration' },
-            { option: 'ip', desc: 'IP information' },
-            { option: 'mac', desc: 'MAC functions' },
-            { option: 'running-config', desc: 'Current operating configuration' },
-            { option: 'standby', desc: 'HSRP information' },
-            { option: 'startup-config', desc: 'Contents of startup configuration' },
-            { option: 'version', desc: 'System hardware and software status' },
-            { option: 'vlan', desc: 'VTP VLAN status' },
-        ],
-        'configure': [
-            { option: 'terminal', desc: 'Configure from the terminal' },
-        ],
-        'ping': [
-            { option: 'WORD', desc: 'Ping destination address or hostname' },
-        ],
-        'hostname': [
-            { option: 'WORD', desc: 'This system\'s network name' },
-        ],
-        'interface': [
-            { option: 'GigabitEthernet', desc: 'GigabitEthernet IEEE 802.3z' },
-            { option: 'Vlan', desc: 'Catalyst Vlans' },
-        ],
-        'vlan': [
-            { option: '<1-4094>', desc: 'VLAN ID' },
-        ],
-        'ip': [
-            { option: 'address', desc: 'Set the IP address of an interface' },
-            { option: 'route', desc: 'Establish static routes' },
-            { option: 'routing', desc: 'Enable IP routing' },
-        ],
-        'switchport': [
-            { option: 'access', desc: 'Set access mode characteristics of the interface' },
-            { option: 'mode', desc: 'Set trunking mode of the interface' },
-        ],
-        'shutdown': [
-            { option: '<cr>', desc: '' },
-        ],
-        'no': [
-            { option: 'hostname', desc: 'Reset system hostname' },
-            { option: 'ip', desc: 'Negate IP commands' },
-            { option: 'shutdown', desc: 'Enable interface' },
-            { option: 'switchport', desc: 'Negate switchport commands' },
-            { option: 'vlan', desc: 'Delete VLAN' },
-        ],
-        'standby': [
-            { option: '<0-255>', desc: 'group number' },
-        ],
-        'name': [
-            { option: 'WORD', desc: 'The ascii name for the VLAN' },
-        ],
-        'copy': [
-            { option: 'running-config', desc: 'Copy from current system configuration' },
-            { option: 'startup-config', desc: 'Copy from startup configuration' },
-        ],
-        'write': [
-            { option: 'memory', desc: 'Write to NV memory' },
-        ],
-    };
-
-    const endsWithSpace = partialInput.endsWith(' ');
-    const inputWords = normalizedInput.split(/\s+/).filter(w => w);
-
-    // 入力が空の場合 → 全コマンド一覧
     if (inputWords.length === 0) {
-        const completions = getCommandCompletions('', mode);
-        for (const cmd of completions) {
-            const desc = commandDescriptions[cmd] || '';
-            helpLines.push(`  ${cmd.padEnd(20)} ${desc}`);
+        targetCandidates = Object.keys(tree);
+    } else if (!endsWithSpace) {
+        // 最後の単語の前方一致ヘルプ
+        const prefixWords = inputWords.slice(0, -1);
+        const lastWord = inputWords[inputWords.length - 1];
+        const targetNode = prefixWords.length === 0 ? tree : getTargetNode(prefixWords, tree, device);
+
+        if (targetNode) {
+            const candidates = Array.isArray(targetNode) ? targetNode : Object.keys(targetNode);
+            targetCandidates = candidates.filter(c => c.toLowerCase().startsWith(lastWord));
         }
-        return helpLines;
-    }
-
-    // スペースで終わる場合 → そのコマンドのオプションを表示
-    if (endsWithSpace) {
-        // 短縮コマンドを解決
-        const completions = getCommandCompletions(partialInput, mode);
-
-        // 完全一致するコマンドを見つける
-        const firstWord = inputWords[0];
-        const allCmds = getCommandCompletions('', mode);
-        const matchedCmd = allCmds.find(c => c.startsWith(firstWord));
-
-        if (matchedCmd && commandOptions[matchedCmd]) {
-            for (const opt of commandOptions[matchedCmd]) {
-                helpLines.push(`  ${opt.option.padEnd(20)} ${opt.desc}`);
-            }
-            return helpLines;
-        }
-
-        // オプション定義がない場合は補完結果を表示
-        for (const cmd of completions) {
-            const desc = commandDescriptions[cmd] || '';
-            helpLines.push(`  ${cmd.padEnd(20)} ${desc}`);
-        }
-        return helpLines;
-    }
-
-    // 入力途中の場合
-    // 1単語の途中入力 → 前方一致するコマンド一覧
-    if (inputWords.length === 1) {
-        const completions = getCommandCompletions(partialInput, mode);
-        if (completions.length === 0) {
-            helpLines.push('% Unrecognized command');
-            return helpLines;
-        }
-        for (const cmd of completions) {
-            const desc = commandDescriptions[cmd] || '';
-            helpLines.push(`  ${cmd.padEnd(20)} ${desc}`);
-        }
-        return helpLines;
-    }
-
-    // 2単語目の途中入力 (例: 'show ver?') → 第1コマンドのオプションから前方一致を表示
-    const firstWord = inputWords[0];
-    const partialSecond = inputWords[1];
-    const allCmds = getCommandCompletions('', mode);
-    const matchedCmd = allCmds.find(c => c.startsWith(firstWord));
-
-    if (matchedCmd && commandOptions[matchedCmd]) {
-        const matchingOpts = commandOptions[matchedCmd].filter(opt =>
-            opt.option.toLowerCase().startsWith(partialSecond)
-        );
-        if (matchingOpts.length > 0) {
-            for (const opt of matchingOpts) {
-                helpLines.push(`  ${opt.option.padEnd(20)} ${opt.desc}`);
-            }
-            return helpLines;
+    } else {
+        // スペース後のヘルプ
+        const targetNode = getTargetNode(inputWords, tree, device);
+        if (targetNode) {
+            if (Array.isArray(targetNode)) targetCandidates = targetNode;
+            else if (typeof targetNode === 'object') targetCandidates = Object.keys(targetNode);
+            else isLeaf = true;
         }
     }
 
-    // フォールバック: getCommandCompletionsの結果を使用
-    const completions = getCommandCompletions(partialInput, mode);
-    if (completions.length === 0) {
+    if (targetCandidates.length > 0) {
+        for (const cand of targetCandidates) {
+            const desc = commandDescriptions[cand] || '';
+            helpLines.push(`  ${cand.padEnd(20)} ${desc}`);
+        }
+        // If it's a node that also accepts ENTER (like 'show running-config')
+        // We should detect it. Current Tree doesn't explicitly mark optional children.
+        // For simplicity, add <cr> if terminal node
+        if (isLeaf) helpLines.push(`  ${'<cr>'.padEnd(20)} `);
+    } else if (isLeaf) {
+        helpLines.push(`  ${'<cr>'.padEnd(20)} `);
+    } else {
         helpLines.push('% Unrecognized command');
-        return helpLines;
-    }
-
-    for (const cmd of completions) {
-        const desc = commandDescriptions[cmd] || '';
-        helpLines.push(`  ${cmd.padEnd(20)} ${desc}`);
     }
 
     return helpLines;

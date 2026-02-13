@@ -155,9 +155,9 @@ export const TemplateDashboard: React.FC = () => {
                         <TemplateCard key={tmpl.id} template={tmpl} />
                     ))}
                 </div>
-                {userTemplates.length === 0 && !isMockAuthEnabled && (
+                {userTemplates.length === 0 && (
                     <p className="text-sm text-gray-500 mt-4 text-center">
-                        ※ ログインして「フリー描画モード」で作成した構成を保存すると、ここに表示されます。
+                        テンプレートがまだ登録されていません。
                     </p>
                 )}
             </div>

@@ -25,6 +25,35 @@ export interface Port {
   ipAddress?: string;
   subnetMask?: string;
   description?: string;
+  // ACL Configuration
+  accessGroupIn?: number;  // ACL ID for Inbound traffic
+  accessGroupOut?: number; // ACL ID for Outbound traffic
+  // DTP Configuration
+  dtpMode?: 'dynamic-auto' | 'dynamic-desirable' | 'none'; // 'none' implies static access/trunk
+}
+
+export interface AccessListEntry {
+  sequence: number; // For manual ordering handling (Cisco auto-sequences usually 10, 20...)
+  action: 'permit' | 'deny';
+  // Standard ACL fields
+  sourceIp?: string;
+  sourceWildcard?: string;
+  // Extended ACL fields
+  protocol?: 'ip' | 'tcp' | 'udp' | 'icmp';
+  destinationIp?: string;
+  destinationWildcard?: string;
+  srcPortOperator?: 'eq' | 'gt' | 'lt' | 'range';
+  srcPort?: number;
+  dstPortOperator?: 'eq' | 'gt' | 'lt' | 'range';
+  dstPort?: number;
+}
+
+export type AccessListType = 'standard' | 'extended';
+
+export interface AccessList {
+  id: number;
+  type: AccessListType;
+  entries: AccessListEntry[];
 }
 
 export interface EtherChannel {
@@ -58,12 +87,23 @@ export interface RouteEntry {
   protocol: 'connected' | 'static' | 'ospf' | 'eigrp' | 'bgp';
 }
 
+export interface StpPortInfo {
+  role: 'root' | 'designated' | 'alternate' | 'backup' | 'disabled';
+  state: 'forwarding' | 'blocking' | 'learning' | 'listening' | 'disabled';
+  cost: number;
+  designatedBridgeId?: string;
+  designatedPortId?: string;
+}
+
 export interface StpState {
   mode: 'pvst' | 'rapid-pvst' | 'mst';
   rootBridgeId?: string;
+  rootPathCost?: number; // Added: Cost to root
+  rootPortId?: string;   // Added: Port facing root
   priority: number;
-  portStates: Record<string, 'forwarding' | 'blocking' | 'learning' | 'listening' | 'disabled'>;
-  vlanConfig?: Record<number, { priority: number; rootType?: 'primary' | 'secondary' }>; // Added for PVST
+  portStates: Record<string, 'forwarding' | 'blocking' | 'learning' | 'listening' | 'disabled'>; // Keep for backward compat
+  portDetails: Record<string, StpPortInfo>; // Added: Detailed info
+  vlanConfig?: Record<number, { priority: number; rootType?: 'primary' | 'secondary' }>;
 }
 
 export interface HsrpState {
@@ -114,6 +154,7 @@ export interface L2Switch extends BaseDevice {
   macAddressTable: MacEntry[];
   stpState: StpState;
   runningConfig: string[];
+  startupConfig: string[]; // Phase 4 Added
   etherChannels: EtherChannel[];
   ipDefaultGateway?: string; // Added
   security: DeviceSecurity; // Added
@@ -143,11 +184,13 @@ export interface L3Switch extends BaseDevice {
   arpTable: ArpEntry[];
   hsrpGroups: HsrpState[];
   runningConfig: string[];
+  startupConfig: string[]; // Phase 4 Added
   etherChannels: EtherChannel[];
   // Routing Protocols
   ospfConfig?: OspfConfig;
   bgpConfig?: BgpConfig;
   security: DeviceSecurity; // Added
+  accessLists: AccessList[]; // Added ACLs
 }
 
 export interface PC extends BaseDevice {
@@ -192,6 +235,7 @@ export interface NetworkState {
   connections: Connection[];
   selectedDeviceId: string | null;
   terminalStates: { [deviceId: string]: TerminalState };
+  note: string; // Added note field
 }
 
 // ========== アクション ==========
@@ -228,6 +272,11 @@ export interface NetworkActions {
 
   // STP状態管理 (内部/デバッグ用)
   setPortStpState: (deviceId: string, portId: string, state: 'blocking' | 'learning' | 'forwarding') => void;
+  recalculateStp: () => void;
+  recalculateRoutes: () => void;
+
+  // メモ機能
+  setNote: (note: string) => void;
 }
 
 export type NetworkStore = NetworkState & NetworkActions;

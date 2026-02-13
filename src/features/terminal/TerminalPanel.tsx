@@ -313,7 +313,7 @@ export default function TerminalPanel({ deviceId, isFullScreen = false, onToggle
         } else if (e.key === 'Tab') {
             e.preventDefault();
             // Tab補完
-            const completions = getCommandCompletions(currentInput, cliState.mode);
+            const completions = getCommandCompletions(currentInput, cliState.mode, device);
             if (completions.length === 1) {
                 // 一意に確定できる場合は補完
                 const completion = completions[0];
@@ -347,7 +347,7 @@ export default function TerminalPanel({ deviceId, isFullScreen = false, onToggle
         } else if (e.key === '?' && !e.shiftKey) {
             // ?キーでヘルプ表示（Shift+?は通常の?入力）
             e.preventDefault();
-            const helpLines = getCommandHelp(currentInput, cliState.mode);
+            const helpLines = getCommandHelp(currentInput, cliState.mode, device);
             const prompt = getPrompt();
             setOutput(prev => [
                 ...prev,

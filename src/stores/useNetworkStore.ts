@@ -9,7 +9,10 @@ import {
     Connection,
     Position,
     Port,
+    NetworkState,
 } from './types';
+import { calculateSpanningTree } from '../lib/stpEngine';
+import { calculateRoutes } from '../lib/routingEngine';
 
 // ========== ヘルパー関数 ==========
 
@@ -20,13 +23,63 @@ const generateMacAddress = () => {
     return `${hex()}:${hex()}:${hex()}:${hex()}:${hex()}:${hex()}`.toUpperCase();
 };
 
+const resolveDtpMode = (p1: Port, p2: Port): { p1Mode: 'access' | 'trunk', p2Mode: 'access' | 'trunk' } => {
+    const m1 = p1.dtpMode || 'none';
+    const m2 = p2.dtpMode || 'none';
+    const static1 = p1.mode; // 'access' | 'trunk'
+    const static2 = p2.mode;
+
+    // Helper to get effective DTP intent
+    const isTrunking = (me: string, other: string, myStatic: string | undefined, otherStatic: string | undefined) => {
+        // If static trunk
+        if (myStatic === 'trunk') return true;
+        if (myStatic === 'access') return false;
+
+        // Dynamic checks
+        if (me === 'dynamic-desirable') {
+            return other === 'dynamic-desirable' || other === 'dynamic-auto' || otherStatic === 'trunk';
+        }
+        if (me === 'dynamic-auto') {
+            return other === 'dynamic-desirable' || otherStatic === 'trunk';
+        }
+        return false;
+    };
+
+    // Determine operational mode
+    // Cisco logic: If negotiation succeeds, become trunk. Else access.
+    // If one side is static Trunk, the other side (if dynamic) becomes Trunk.
+    // If one side is static Access, the other side (if dynamic) becomes Access.
+
+    // Check P1
+    let p1Res: 'access' | 'trunk' = 'access';
+    if (static1 === 'trunk') p1Res = 'trunk';
+    else if (static1 === 'access') p1Res = 'access';
+    else {
+        // P1 is dynamic
+        if (isTrunking(m1, m2, static1, static2)) p1Res = 'trunk';
+        else p1Res = 'access';
+    }
+
+    // Check P2
+    let p2Res: 'access' | 'trunk' = 'access';
+    if (static2 === 'trunk') p2Res = 'trunk';
+    else if (static2 === 'access') p2Res = 'access';
+    else {
+        // P2 is dynamic
+        if (isTrunking(m2, m1, static2, static1)) p2Res = 'trunk';
+        else p2Res = 'access';
+    }
+
+    return { p1Mode: p1Res, p2Mode: p2Res };
+};
+
 // L2スイッチのポート生成（Gi1/0/1 ~ Gi1/0/24）
 const createL2SwitchPorts = (): Port[] => {
     return Array.from({ length: 24 }, (_, i) => ({
         id: generateId(),
         name: `Gi1/0/${i + 1}`,
         connectedTo: null,
-        status: 'up' as const,
+        status: 'down' as const,
         vlan: 1,
     }));
 };
@@ -37,7 +90,7 @@ const createL3SwitchPorts = (): Port[] => {
         id: generateId(),
         name: `Gi1/0/${i + 1}`,
         connectedTo: null,
-        status: 'up' as const,
+        status: 'down' as const,
         vlan: 1,
     }));
 };
@@ -48,7 +101,7 @@ const createPCPorts = (): Port[] => {
         id: generateId(),
         name: 'eth0',
         connectedTo: null,
-        status: 'up' as const,
+        status: 'down' as const,
     }];
 };
 
@@ -69,8 +122,16 @@ export const createL2Switch = (name: string, position: Position): L2Switch => ({
         mode: 'rapid-pvst',
         priority: 32768,
         portStates: {},
+        portDetails: {}, // Added
     },
     runningConfig: [
+        '!',
+        `hostname ${name}`,
+        '!',
+        'spanning-tree mode rapid-pvst',
+        '!',
+    ],
+    startupConfig: [
         '!',
         `hostname ${name}`,
         '!',
@@ -96,11 +157,22 @@ export const createL3Switch = (name: string, position: Position): L3Switch => ({
         mode: 'rapid-pvst',
         priority: 32768,
         portStates: {},
+        portDetails: {}, // Added
     },
+    ospfConfig: { processId: 1, networks: [] },
+    bgpConfig: { asNumber: 65000, neighbors: [], networks: [] },
     routingTable: [],
     arpTable: [],
     hsrpGroups: [],
+    accessLists: [], // Initialize ACLs
     runningConfig: [
+        '!',
+        `hostname ${name}`,
+        '!',
+        'ip routing',
+        '!',
+    ],
+    startupConfig: [
         '!',
         `hostname ${name}`,
         '!',
@@ -143,6 +215,7 @@ const initialState = {
     connections: [] as Connection[],
     selectedDeviceId: null as string | null,
     terminalStates: {} as { [deviceId: string]: import('./types').TerminalState },
+    note: '',
 };
 
 // Initialize connections and specific configs after creation (Helper to build the scenario)
@@ -159,6 +232,10 @@ const buildScenario = (state: typeof initialState) => {
         const p2 = d2.ports.find(p => p.name === p2Name)!;
         p1.connectedTo = p2.id;
         p2.connectedTo = p1.id;
+        // 接続時はポートステータスをupにする
+        p1.status = 'up';
+        p2.status = 'up';
+
         conns.push({
             id: generateId(),
             sourceDeviceId: d1.id,
@@ -261,6 +338,10 @@ const buildScenario = (state: typeof initialState) => {
         updateDevStp(conn.targetDeviceId, conn.targetPortId);
     });
 
+    // NOTE: We do not run calculateSpanningTree here because store is not yet created. 
+    // It will be calculated once specific actions occur or on initial load if we want.
+    // However, persist might overwrite this state anyway.
+
     return state;
 };
 
@@ -273,11 +354,57 @@ export const useNetworkStore = create<NetworkStore>()(
         (set, get) => ({
             ...initialState,
 
+            //Helper to trigger STP recalc
+            recalculateStp: () => {
+                const { devices, connections } = get();
+                const stpResults = calculateSpanningTree(devices, connections);
+
+                set((state) => ({
+                    devices: state.devices.map((d) => {
+                        const res = stpResults.get(d.id);
+                        if (res && (d.type === 'l2-switch' || d.type === 'l3-switch')) {
+                            // Merge new STP state
+                            const sw = d as L2Switch | L3Switch; // safe cast
+                            return {
+                                ...sw,
+                                stpState: {
+                                    ...sw.stpState,
+                                    rootBridgeId: res.rootBridgeId,
+                                    rootPathCost: res.rootPathCost,
+                                    rootPortId: res.rootPortId,
+                                    portStates: res.portStates,
+                                    portDetails: res.portDetails
+                                }
+                            };
+                        }
+                        return d;
+                    })
+                }));
+            },
+
+            recalculateRoutes: () => {
+                const { devices, connections } = get();
+                const routeResults = calculateRoutes(devices, connections);
+
+                set((state) => ({
+                    devices: state.devices.map((d) => {
+                        if (d.type === 'l3-switch') {
+                            const routes = routeResults.get(d.id);
+                            if (routes) {
+                                return { ...d, routingTable: routes } as L3Switch;
+                            }
+                        }
+                        return d;
+                    })
+                }));
+            },
+
             // デバイス追加
             addDevice: (device) => {
                 set((state) => ({
                     devices: [...state.devices, device],
                 }));
+                // No STP recalc needed for pure device add unless it has links pre-configured (unlikely in UI)
             },
 
             // デバイス削除
@@ -317,6 +444,10 @@ export const useNetworkStore = create<NetworkStore>()(
                     ),
                     selectedDeviceId: state.selectedDeviceId === deviceId ? null : state.selectedDeviceId,
                 });
+
+                // Trigger STP Recalc
+                (get() as any).recalculateStp();
+                (get() as any).recalculateRoutes();
             },
 
             // デバイス更新
@@ -326,6 +457,12 @@ export const useNetworkStore = create<NetworkStore>()(
                         d.id === deviceId ? { ...d, ...updates } as Device : d
                     ),
                 }));
+                // If priority changes, we should recalc. For now assuming updates are mostly names/IPs.
+                // If updates contain stpState (priority), we should trigger.
+                if ('stpState' in updates) {
+                    (get() as any).recalculateStp();
+                }
+                (get() as any).recalculateRoutes();
             },
 
             // デバイス位置更新
@@ -337,11 +474,13 @@ export const useNetworkStore = create<NetworkStore>()(
                 }));
             },
 
-            // 接続追加
+            // 接続追加 (Manual)
             addConnection: (connection) => {
                 set((state) => ({
                     connections: [...state.connections, connection],
                 }));
+                (get() as any).recalculateStp();
+                (get() as any).recalculateRoutes();
             },
 
             // 接続削除
@@ -359,7 +498,9 @@ export const useNetworkStore = create<NetworkStore>()(
                                 ...d,
                                 ports: d.ports.map((port) => {
                                     if (port.id === connection.sourcePortId || port.id === connection.targetPortId) {
-                                        return { ...port, connectedTo: null };
+                                        // admin-downでないなら、切断時はdown(物理リンクダウン)にする
+                                        const newStatus = port.status === 'admin-down' ? 'admin-down' : 'down';
+                                        return { ...port, connectedTo: null, status: newStatus };
                                     }
                                     return port;
                                 }),
@@ -369,6 +510,9 @@ export const useNetworkStore = create<NetworkStore>()(
                     }),
                     connections: state.connections.filter((c) => c.id !== connectionId),
                 });
+
+                (get() as any).recalculateStp();
+                (get() as any).recalculateRoutes();
             },
 
             // デバイス選択
@@ -398,86 +542,106 @@ export const useNetworkStore = create<NetworkStore>()(
             connectPorts: (sourceDeviceId, sourcePortId, targetDeviceId, targetPortId, sourceHandle, targetHandle) => {
                 const connectionId = generateId();
 
-                set((state) => ({
-                    devices: state.devices.map((d) => {
-                        if (d.id === sourceDeviceId) {
-                            return {
-                                ...d,
-                                ports: d.ports.map((p) =>
-                                    p.id === sourcePortId ? { ...p, connectedTo: targetPortId } : p
-                                ),
-                            } as Device;
-                        }
-                        if (d.id === targetDeviceId) {
-                            return {
-                                ...d,
-                                ports: d.ports.map((p) =>
-                                    p.id === targetPortId ? { ...p, connectedTo: sourcePortId } : p
-                                ),
-                            } as Device;
-                        }
-                        return d;
-                    }),
-                    connections: [
-                        ...state.connections,
-                        {
-                            id: connectionId,
-                            sourceDeviceId,
-                            sourcePortId,
-                            sourceHandle: sourceHandle || undefined,
-                            targetDeviceId,
-                            targetPortId,
-                            targetHandle: targetHandle || undefined,
-                            status: 'up',
-                        },
-                    ],
-                }));
+                set((state) => {
+                    // Pre-calculate DTP results based on current ports in state
+                    const d1 = state.devices.find(d => d.id === sourceDeviceId);
+                    const d2 = state.devices.find(d => d.id === targetDeviceId);
+                    const p1 = d1?.ports.find(p => p.id === sourcePortId);
+                    const p2 = d2?.ports.find(p => p.id === targetPortId);
 
-                // Initial STP Hook: Trigger Blocking -> Learning -> Forwarding
-                // Helper to update STP state
-                const updateStp = (devId: string, portId: string, state: 'blocking' | 'learning' | 'forwarding') => {
-                    set((s) => ({
-                        devices: s.devices.map((d) => {
-                            if (d.id === devId && (d.type === 'l2-switch' || d.type === 'l3-switch')) {
+                    let p1ModeUpdate: 'access' | 'trunk' | undefined = undefined;
+                    let p2ModeUpdate: 'access' | 'trunk' | undefined = undefined;
+
+                    if (p1 && p2) {
+                        const { p1Mode, p2Mode } = resolveDtpMode(p1, p2);
+                        // Only update if it was dynamic (dtpMode is set) or if simulate DTP on static ports? 
+                        // Actually, resolveDtpMode returns the *operational* mode. 
+                        // We should update the 'mode' property.
+                        // But wait, 'mode' property is used for "switchport mode trunk" configuration too.
+                        // If user configured "switchport mode dynamic auto", then 'mode' isn't explicitly 'trunk' or 'access' initially?
+                        // In our type definitions: mode?: 'access' | 'trunk' | 'dynamic' | 'routed';
+                        // So if we update 'mode' to 'trunk', we lose the fact it was 'dynamic'.
+                        // Ideally we need 'operationalMode'. 
+                        // But for Phase 4 simplicity: We update 'mode' IF the current mode is dynamic-ish?
+                        // Or we assume 'mode' in types.ts stores the CONFIG.
+                        // And we need another field for OPERATIONAL status.
+                        // However, previous code uses 'mode' for logic.
+                        // Let's check types.ts: mode?: 'access' | 'trunk' | 'dynamic' | 'routed';
+                        // And dtpMode?: ...
+
+                        // User configures: `switchport mode dynamic auto` -> mode='dynamic', dtpMode='dynamic-auto'
+                        // System negotiates: -> Operational needs to be calculated.
+
+                        // For this implementation, let's keep 'mode' as the EFFECTIVE mode for traffic/STP, 
+                        // but if we overwrite it, we lose the config 'dynamic'.
+                        // Wait, if I change mode to 'trunk', show run will say 'switchport mode trunk'.
+                        // That is wrong.
+
+                        // We should probably NOT change the stored config 'mode' here if possible, 
+                        // unless we add an 'operationalMode' field.
+                        // Given constraints, I will add 'operationalMode' to Port type? 
+                        // No, let's use 'mode' as operational, and rely on 'dtpMode' to remember it's dynamic.
+                        // Re-negotiation happens on connect.
+                        // If dtpMode is set, we recalculate 'mode' (operational).
+
+                        p1ModeUpdate = (p1.dtpMode && p1.dtpMode !== 'none') ? p1Mode : undefined;
+                        p2ModeUpdate = (p2.dtpMode && p2.dtpMode !== 'none') ? p2Mode : undefined;
+                    }
+
+                    return {
+                        devices: state.devices.map((d) => {
+                            if (d.id === sourceDeviceId) {
                                 return {
                                     ...d,
-                                    stpState: {
-                                        ...((d as L2Switch).stpState),
-                                        portStates: {
-                                            ...((d as L2Switch).stpState.portStates),
-                                            [portId]: state
+                                    ports: d.ports.map((p) => {
+                                        if (p.id === sourcePortId) {
+                                            const newStatus = p.status === 'admin-down' ? 'admin-down' : 'up';
+                                            const mode = p1ModeUpdate !== undefined ? p1ModeUpdate : p.mode;
+                                            return { ...p, connectedTo: targetPortId, status: newStatus, mode };
                                         }
-                                    }
+                                        return p;
+                                    }),
+                                } as Device;
+                            }
+                            if (d.id === targetDeviceId) {
+                                return {
+                                    ...d,
+                                    ports: d.ports.map((p) => {
+                                        if (p.id === targetPortId) {
+                                            const newStatus = p.status === 'admin-down' ? 'admin-down' : 'up';
+                                            const mode = p2ModeUpdate !== undefined ? p2ModeUpdate : p.mode;
+                                            return { ...p, connectedTo: sourcePortId, status: newStatus, mode };
+                                        }
+                                        return p;
+                                    }),
                                 } as Device;
                             }
                             return d;
-                        })
-                    }));
-                };
+                        }),
+                        connections: [
+                            ...state.connections,
+                            {
+                                id: connectionId,
+                                sourceDeviceId,
+                                sourcePortId,
+                                sourceHandle: sourceHandle || undefined,
+                                targetDeviceId,
+                                targetPortId,
+                                targetHandle: targetHandle || undefined,
+                                status: 'up',
+                            },
+                        ],
+                    };
+                });
 
-                const triggerStpSequence = (devId: string, portId: string) => {
-                    const dev = get().devices.find(d => d.id === devId);
-                    if (dev && (dev.type === 'l2-switch' || dev.type === 'l3-switch')) {
-                        // Start Blocking (Amber)
-                        updateStp(devId, portId, 'blocking');
-
-                        // To Learning (Blinking Amber) after 2s
-                        setTimeout(() => {
-                            updateStp(devId, portId, 'learning');
-                            // To Forwarding (Green) after another 2s
-                            setTimeout(() => {
-                                updateStp(devId, portId, 'forwarding');
-                            }, 2000);
-                        }, 2000);
-                    }
-                };
-
-                triggerStpSequence(sourceDeviceId, sourcePortId);
-                triggerStpSequence(targetDeviceId, targetPortId);
+                // Trigger STP Recalc
+                (get() as any).recalculateStp();
+                (get() as any).recalculateRoutes();
             },
 
             // Set port STP state (internal/expert use)
             setPortStpState: (deviceId: string, portId: string, state: 'blocking' | 'learning' | 'forwarding') => {
+                // Manual override might be overwritten by auto-recalc if topology changes
                 set((s) => ({
                     devices: s.devices.map((d) => {
                         if (d.id === deviceId && (d.type === 'l2-switch' || d.type === 'l3-switch')) {
@@ -507,44 +671,7 @@ export const useNetworkStore = create<NetworkStore>()(
                 );
 
                 if (connection) {
-                    get().removeConnection(connection.id);
-                }
-            },
-
-
-
-            // JSON エクスポート
-            exportToJson: () => {
-                const state = get();
-                return JSON.stringify(
-                    {
-                        version: '1.0',
-                        exportedAt: new Date().toISOString(),
-                        devices: state.devices,
-                        connections: state.connections,
-                    },
-                    null,
-                    2
-                );
-            },
-
-            // JSON インポート
-            importFromJson: (json) => {
-                try {
-                    const data = JSON.parse(json);
-                    if (!data.devices || !data.connections) {
-                        console.error('Invalid JSON format');
-                        return false;
-                    }
-                    set({
-                        devices: data.devices,
-                        connections: data.connections,
-                        selectedDeviceId: null,
-                    });
-                    return true;
-                } catch (e) {
-                    console.error('Failed to import JSON:', e);
-                    return false;
+                    get().removeConnection(connection.id); // This already calls recalculateStp
                 }
             },
 
@@ -575,10 +702,91 @@ export const useNetworkStore = create<NetworkStore>()(
             getTerminalState: (deviceId) => {
                 return get().terminalStates[deviceId];
             },
+
+            // メモ機能
+            setNote: (note) => {
+                set({ note });
+            },
+
+            // override exportToJson to include note
+            exportToJson: () => {
+                const state = get();
+                return JSON.stringify(
+                    {
+                        version: '1.1', // Bump version
+                        exportedAt: new Date().toISOString(),
+                        devices: state.devices,
+                        connections: state.connections,
+                        note: state.note, // Include note
+                    },
+                    null,
+                    2
+                );
+            },
+
+            // override importFromJson to read note
+            importFromJson: (json) => {
+                try {
+                    const data = JSON.parse(json);
+                    if (!data.devices || !data.connections) {
+                        console.error('Invalid JSON format');
+                        return false;
+                    }
+                    set({
+                        devices: data.devices.map((d: Device) => ({
+                            ...d,
+                            ports: d.ports.map((p: Port) => {
+                                if (!p.connectedTo && p.status !== 'admin-down') {
+                                    return { ...p, status: 'down' };
+                                }
+                                if (p.connectedTo && p.status === 'down') {
+                                    return { ...p, status: 'up' };
+                                }
+                                return p;
+                            })
+                        })),
+                        connections: data.connections,
+                        selectedDeviceId: null,
+                        note: data.note || '', // Import note
+                    });
+
+                    // Recalc on import
+                    (get() as any).recalculateStp();
+                    (get() as any).recalculateRoutes();
+
+                    return true;
+                } catch (e) {
+                    console.error('Failed to import JSON:', e);
+                    return false;
+                }
+            },
         }),
         {
             name: 'network-simulator-storage',
-            version: 1,
+            version: 2, // Version up to force migration
+            migrate: (persistedState: any, version: number) => {
+                if (version < 2) {
+                    // version 1 -> 2: Fix port status inconsistency
+                    // 以前のバージョンで未接続なのにupになっているポートをdownに修正
+                    const state = persistedState as NetworkState;
+                    if (state.devices) {
+                        state.devices = state.devices.map((d: Device) => ({
+                            ...d,
+                            ports: d.ports.map((p: Port) => {
+                                if (!p.connectedTo && p.status !== 'admin-down') {
+                                    return { ...p, status: 'down' };
+                                }
+                                if (p.connectedTo && p.status === 'down') {
+                                    return { ...p, status: 'up' };
+                                }
+                                return p;
+                            })
+                        }));
+                    }
+                    return state;
+                }
+                return persistedState as NetworkStore;
+            },
         }
     )
 );

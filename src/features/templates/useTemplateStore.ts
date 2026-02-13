@@ -1,7 +1,7 @@
 
 import { create } from 'zustand';
 import { db } from '@/lib/firebase';
-import { collection, query, where, getDocs, setDoc, deleteDoc, doc } from 'firebase/firestore';
+import { collection, query, where, getDocs, setDoc, deleteDoc, doc, onSnapshot, orderBy } from 'firebase/firestore';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import { NetworkTemplate, User } from './types';
 import { OFFICIAL_TEMPLATES } from './mockData';
@@ -24,6 +24,7 @@ interface TemplateStoreState {
     setMode: (mode: 'free' | 'preset') => void;
     setCurrentUser: (user: User | null) => void;
     logout: () => void;
+    subscribeToTemplates: () => () => void; // Returns unsubscribe function
 
     // Repository Methods (Future: Replace implementation with Firebase calls)
     loadUserTemplates: () => void;
@@ -64,6 +65,25 @@ export const useTemplateStore = create<TemplateStoreState>()(
 
             logout: () => {
                 set({ currentUser: null, isMockAuthEnabled: false });
+            },
+
+            subscribeToTemplates: () => {
+                const q = query(
+                    collection(db, 'templates'),
+                    orderBy('createdAt', 'desc')
+                );
+
+                const unsubscribe = onSnapshot(q, (querySnapshot) => {
+                    const templates: NetworkTemplate[] = [];
+                    querySnapshot.forEach((doc) => {
+                        templates.push({ id: doc.id, ...doc.data() } as NetworkTemplate);
+                    });
+                    set({ userTemplates: templates });
+                }, (error) => {
+                    console.error("Error subscribing to templates: ", error);
+                });
+
+                return unsubscribe;
             },
 
             // --- Data Repository Layer (Firestore) ---

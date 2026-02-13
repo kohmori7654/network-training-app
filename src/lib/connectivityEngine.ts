@@ -4,7 +4,7 @@
  * VLAN, Trunk, EtherChannel, L3ルーティングを考慮
  */
 
-import { Device, PC, L2Switch, L3Switch, Connection, Port, HsrpState } from '@/stores/types';
+import { Device, PC, L2Switch, L3Switch, Connection, Port, HsrpState, AccessList, AccessListEntry, ArpEntry } from '@/stores/types';
 
 // IPアドレスをサブネット計算用の数値に変換
 function ipToNumber(ip: string): number {
@@ -20,6 +20,47 @@ function isSameSubnet(ip1: string, ip2: string, mask: string): boolean {
     return (ip1Num & maskNum) === (ip2Num & maskNum);
 }
 
+// IP Match Helper (Wildcard: 0=Match, 1=Ignore)
+function isIpMatch(ip: string, patternIp: string, wildcard: string): boolean {
+    const ipNum = ipToNumber(ip);
+    const patternNum = ipToNumber(patternIp);
+    const wildNum = ipToNumber(wildcard);
+    return (ipNum & ~wildNum) === (patternNum & ~wildNum);
+}
+
+// ACL Check Logic
+function checkAccessList(acl: AccessList, srcIp: string, dstIp: string, protocol: string): 'permit' | 'deny' {
+    for (const entry of acl.entries) {
+        let match = true;
+
+        if (acl.type === 'standard') {
+            if (entry.sourceIp && entry.sourceWildcard) {
+                if (!isIpMatch(srcIp, entry.sourceIp, entry.sourceWildcard)) match = false;
+            }
+        } else {
+            // Extended
+            if (entry.protocol && entry.protocol !== 'ip') {
+                if (entry.protocol !== protocol) match = false;
+            }
+            if (match && entry.sourceIp && entry.sourceWildcard) {
+                if (!isIpMatch(srcIp, entry.sourceIp, entry.sourceWildcard)) match = false;
+            }
+            if (match && entry.destinationIp && entry.destinationWildcard) {
+                if (!isIpMatch(dstIp, entry.destinationIp, entry.destinationWildcard)) match = false;
+            }
+        }
+
+        if (match) return entry.action;
+    }
+    return 'deny'; // Implicit deny
+}
+
+interface PacketContext {
+    srcIp: string;
+    dstIp: string;
+    protocol: 'icmp' | 'tcp' | 'udp' | 'ip';
+}
+
 // Ping結果
 export interface PingResult {
     success: boolean;
@@ -27,6 +68,7 @@ export interface PingResult {
     hops: string[];
     rtt: number[];
     errors: string[];
+    arpUpdates?: { deviceId: string; entry: ArpEntry }[]; // Added
 }
 
 // Traceroute結果
@@ -179,7 +221,7 @@ export class ConnectivityEngine {
         return port;
     }
 
-    private findPath(sourceId: string, targetId: string, startVlanId?: number): string[] | null {
+    private findPath(sourceId: string, targetId: string, startVlanId?: number, packetContext?: PacketContext): string[] | null {
         const visited = new Set<string>();
         // allow startVlanId = -1 to denote "routed port context" (strictly L3) if needed, 
         // but undefined (untagged) is sufficient for routed ports.
@@ -213,6 +255,44 @@ export class ConnectivityEngine {
 
                 const outboundPort = this.getEffectivePort(node.device, neighbor.port);
                 const inboundPort = this.getEffectivePort(nextNode.device, neighbor.neighborPort);
+
+                // --- 0. STP Check (Egress) ---
+                if (node.device.type === 'l2-switch' || node.device.type === 'l3-switch') {
+                    const sw = node.device as L2Switch | L3Switch;
+                    const stpState = sw.stpState?.portStates?.[outboundPort.id]; // Optional chain for safety
+                    // If defined and NOT forwarding, block. (Assume Forwarding if undefined or 'disabled' handled elsewhere)
+                    // Note: 'disabled' logic handled by port status check generally, but STP disabled port is also blocking.
+                    if (stpState && stpState !== 'forwarding') {
+                        continue; // Blocked by STP
+                    }
+                }
+
+                // --- 0.5 ACL Check (Egress & Ingress) ---
+                if (packetContext) {
+                    const { srcIp, dstIp, protocol } = packetContext;
+
+                    // Egress Check (Current Node)
+                    if (node.device.type === 'l3-switch') {
+                        const sw = node.device as L3Switch;
+                        if (outboundPort.accessGroupOut) {
+                            const acl = sw.accessLists?.find(a => a.id === outboundPort.accessGroupOut);
+                            if (acl) {
+                                if (checkAccessList(acl, srcIp, dstIp, protocol) === 'deny') continue;
+                            }
+                        }
+                    }
+
+                    // Ingress Check (Next Node)
+                    if (nextNode.device.type === 'l3-switch') {
+                        const sw = nextNode.device as L3Switch;
+                        if (inboundPort.accessGroupIn) {
+                            const acl = sw.accessLists?.find(a => a.id === inboundPort.accessGroupIn);
+                            if (acl) {
+                                if (checkAccessList(acl, srcIp, dstIp, protocol) === 'deny') continue;
+                            }
+                        }
+                    }
+                }
 
                 // --- 1. Egress Check ---
                 let wireVlanId: number | undefined;
@@ -355,12 +435,18 @@ export class ConnectivityEngine {
             if (!pc.ipAddress) return { success: false, reachable: false, hops: [], rtt: [], errors: ['No IP'] };
             if (pc.ipAddress === targetIp) return { success: true, reachable: true, hops: ['localhost'], rtt: [0], errors: [] };
 
+            const packetContext: PacketContext = {
+                srcIp: pc.ipAddress,
+                dstIp: targetIp,
+                protocol: 'icmp'
+            };
+
             // L2 Reachability
             if (isSameSubnet(pc.ipAddress, targetIp, pc.subnetMask)) {
                 if (!targetDevice) return { success: true, reachable: false, hops: [], rtt: [], errors: ['Destination Unreachable'] };
-                const path = this.findPath(sourceDeviceId, targetDevice.id, undefined);
+                const path = this.findPath(sourceDeviceId, targetDevice.id, undefined, packetContext);
                 return path
-                    ? { success: true, reachable: true, hops: path.map(id => this.getDevice(id)?.hostname || id), rtt: [1, 1, 1, 1], errors: [] }
+                    ? { success: true, reachable: true, hops: path.map(id => this.getDevice(id)?.hostname || id), rtt: [1, 1, 1, 1, 1], errors: [] }
                     : { success: true, reachable: false, hops: [], rtt: [], errors: ['Destination Unreachable'] };
             }
 
@@ -370,7 +456,7 @@ export class ConnectivityEngine {
             if (!gateway) return { success: true, reachable: false, hops: [], rtt: [], errors: ['Gateway Unreachable'] };
 
             // Path to Gateway
-            const pathToGw = this.findPath(sourceDeviceId, gateway.id, undefined);
+            const pathToGw = this.findPath(sourceDeviceId, gateway.id, undefined, packetContext);
             if (!pathToGw) return { success: true, reachable: false, hops: [], rtt: [], errors: ['Gateway Unreachable'] };
 
             // Gateway routing
@@ -383,9 +469,8 @@ export class ConnectivityEngine {
                     const egressContext = this.findEgressContext(gateway as L3Switch, targetIp);
                     // findPath starting from Gateway with egressContext
                     // If egressContext is undefined, it might mean routed port OR failure.
-                    // But findPath treats undefined as "untagged" which works for routed port.
                     // We just need to ensure startVlanId is respected in findPath. 
-                    const pathFromGw = this.findPath(gateway.id, targetDevice.id, egressContext);
+                    const pathFromGw = this.findPath(gateway.id, targetDevice.id, egressContext, packetContext);
 
                     if (pathFromGw) {
                         const path = [...new Set([...pathToGw, ...pathFromGw])];
@@ -400,10 +485,93 @@ export class ConnectivityEngine {
         // --- L3 Switch Ping Logic ---
         if (sourceDevice.type === 'l3-switch') {
             if (!targetDevice) return { success: true, reachable: false, hops: [], rtt: [], errors: ['Destination Unreachable'] };
+
+            // Determine Source IP for ACL check
+            const l3 = sourceDevice as L3Switch;
+            const routedPort = l3.ports.find(p => p.mode === 'routed' && p.ipAddress);
+            // Theoretically we should check which interface is used for egress, but simplifying:
+            const sourceIp = routedPort?.ipAddress || '0.0.0.0';
+
+            const packetContext: PacketContext = {
+                srcIp: sourceIp,
+                dstIp: targetIp,
+                protocol: 'icmp'
+            };
+
             const egressContext = this.findEgressContext(sourceDevice as L3Switch, targetIp);
-            const path = this.findPath(sourceDeviceId, targetDevice.id, egressContext);
+
+            // ARP Check Logic
+            const srcL3 = sourceDevice as L3Switch;
+            // Determine ARP Target IP (Direct destination or Next Hop)
+            // Ideally we check routing table for Next Hop.
+            // Simplified: If same subnet as any interface, ARP for targetIp.
+            // Else, look for route.
+
+            // Checking Connected Subnets
+            let arpTargetIp: string | null = null;
+            let outgoingInterface: string = 'unknown';
+
+            // Check Connected SVI/RoutedPorts
+            let isConnected = false;
+            for (const h of srcL3.hsrpGroups) {
+                if (isSameSubnet(h.virtualIp, targetIp, '255.255.255.0')) {
+                    isConnected = true;
+                    outgoingInterface = `Vlan${h.group}`;
+                    break;
+                }
+            }
+            if (!isConnected) {
+                for (const p of srcL3.ports) {
+                    if (p.mode === 'routed' && p.ipAddress && p.subnetMask) {
+                        if (isSameSubnet(p.ipAddress, targetIp, p.subnetMask)) {
+                            isConnected = true;
+                            outgoingInterface = p.name;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (isConnected) {
+                arpTargetIp = targetIp;
+            } else {
+                // Routing Lookup needed to find Next Hop
+                // Skip for now or assume Default Gateway if exists?
+                // If simple Ping to connected host, isConnected is true.
+            }
+
+            if (arpTargetIp) {
+                const hasArp = srcL3.arpTable.some(e => e.ipAddress === arpTargetIp);
+                if (!hasArp && targetDevice) {
+                    // ARP Miss -> Return Timeout BUT provide ARP update for next time
+                    let targetMac = '';
+                    if (targetDevice.type === 'l2-switch' || targetDevice.type === 'l3-switch') targetMac = (targetDevice as L2Switch | L3Switch).macAddress;
+                    else if (targetDevice.type === 'pc') targetMac = (targetDevice as PC).macAddress;
+
+                    if (targetMac) {
+                        return {
+                            success: true,
+                            reachable: false, // Timeout
+                            hops: [],
+                            rtt: [],
+                            errors: ['Request timed out.'],
+                            arpUpdates: [{
+                                deviceId: sourceDeviceId,
+                                entry: {
+                                    ipAddress: arpTargetIp,
+                                    macAddress: targetMac,
+                                    interface: outgoingInterface,
+                                    age: 0
+                                }
+                            }]
+                        };
+                    }
+                }
+            }
+
+            const path = this.findPath(sourceDeviceId, targetDevice.id, egressContext, packetContext);
             return path
-                ? { success: true, reachable: true, hops: path.map(id => this.getDevice(id)?.hostname || id), rtt: [1, 1, 1, 1], errors: [] }
+                ? { success: true, reachable: true, hops: path.map(id => this.getDevice(id)?.hostname || id), rtt: [1, 1, 1, 1, 1], errors: [] }
                 : { success: true, reachable: false, hops: [], rtt: [], errors: ['Destination Unreachable'] };
         }
 

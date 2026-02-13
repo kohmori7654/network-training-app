@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { Download, Upload, RotateCcw, Network, ChevronRight, ChevronLeft, GripVertical } from 'lucide-react';
+import { Download, UploadCloud, RotateCcw, Network, ChevronRight, ChevronLeft, ClipboardCopy } from 'lucide-react';
 import dynamic from 'next/dynamic';
 import useNetworkStore from '@/stores/useNetworkStore';
 import DevicePalette from '@/features/canvas/DevicePalette';
@@ -40,8 +40,14 @@ export default function MainLayout() {
     const [isTerminalFullScreen, setIsTerminalFullScreen] = useState(false);
 
     // Template Mode State
-    const { currentMode, isMockAuthEnabled } = useTemplateStore();
+    const { currentMode, isMockAuthEnabled, subscribeToTemplates } = useTemplateStore();
     const [isSaveModalOpen, setIsSaveModalOpen] = useState(false);
+
+    // Subscribe to templates for real-time updates
+    useEffect(() => {
+        const unsubscribe = subscribeToTemplates();
+        return () => unsubscribe();
+    }, [subscribeToTemplates]);
 
     // リサイズ用Ref
     const sidebarRef = useRef<HTMLDivElement>(null);
@@ -132,6 +138,40 @@ export default function MainLayout() {
         }
     }, [resetState]);
 
+    // クリップボードへコピー（iframe 埋め込み時も動作するよう execCommand フォールバック付き）
+    const copyToClipboard = useCallback((text: string): Promise<boolean> => {
+        if (navigator.clipboard?.writeText) {
+            return navigator.clipboard.writeText(text).then(() => true).catch(() => false);
+        }
+        // iframe や古い環境では Clipboard API が使えない場合がある → フォールバック
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.style.position = 'fixed';
+        textarea.style.left = '-9999px';
+        textarea.style.top = '0';
+        document.body.appendChild(textarea);
+        textarea.focus();
+        textarea.select();
+        let ok = false;
+        try {
+            ok = document.execCommand('copy');
+        } finally {
+            document.body.removeChild(textarea);
+        }
+        return Promise.resolve(ok);
+    }, []);
+
+    const handleCopyJson = useCallback(() => {
+        const json = exportToJson();
+        copyToClipboard(json).then((ok) => {
+            if (ok) {
+                alert('クリップボードにコピーしました');
+            } else {
+                alert('コピーに失敗しました。ブラウザの権限またはポップアップを許可してください。');
+            }
+        });
+    }, [exportToJson, copyToClipboard]);
+
     return (
         <div className="h-screen flex flex-col bg-slate-950 select-none">
             {/* ヘッダー */}
@@ -159,6 +199,13 @@ export default function MainLayout() {
                         </button>
                     )}
                     <button
+                        onClick={handleCopyJson}
+                        className="flex items-center gap-2 px-3 py-1.5 bg-teal-600 hover:bg-teal-700 text-white text-sm rounded transition-colors"
+                    >
+                        <ClipboardCopy size={16} />
+                        Copy JSON
+                    </button>
+                    <button
                         onClick={handleExport}
                         className="flex items-center gap-2 px-3 py-1.5 bg-green-600 hover:bg-green-700 text-white text-sm rounded transition-colors"
                     >
@@ -169,7 +216,7 @@ export default function MainLayout() {
                         onClick={handleImport}
                         className="flex items-center gap-2 px-3 py-1.5 bg-blue-600 hover:bg-blue-700 text-white text-sm rounded transition-colors"
                     >
-                        <Upload size={16} />
+                        <UploadCloud size={16} />
                         Import JSON
                     </button>
                     <button
@@ -303,9 +350,9 @@ export default function MainLayout() {
                 <div className="fixed inset-0 z-50 cursor-col-resize" />
             )}
 
-            {/* ターミナル全画面表示 */}
+            {/* ターミナル全画面表示（左カラム・デバイスパレットは覆わない: left-52 = w-52 と揃える） */}
             {isTerminalFullScreen && (
-                <div className="fixed inset-0 z-40 bg-black">
+                <div className="fixed left-52 top-0 right-0 bottom-0 z-40 bg-black">
                     <TerminalPanel
                         deviceId={selectedDeviceId}
                         isFullScreen={true}

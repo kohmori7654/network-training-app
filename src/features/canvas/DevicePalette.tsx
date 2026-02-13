@@ -1,7 +1,6 @@
-'use client';
-
 import React from 'react';
 import { Monitor, Server, Layers, MessageSquare } from 'lucide-react';
+import useNetworkStore from '@/stores/useNetworkStore';
 
 interface DevicePaletteItemProps {
     type: string;
@@ -30,7 +29,8 @@ function DevicePaletteItem({ type, label, icon, description }: DevicePaletteItem
 }
 
 export default function DevicePalette() {
-    const [activeTab, setActiveTab] = React.useState<'devices' | 'hints'>('devices');
+    const [activeTab, setActiveTab] = React.useState<'devices' | 'memo'>('devices');
+    const { note, setNote } = useNetworkStore();
 
     return (
         <div className="w-52 bg-slate-900 border-r border-slate-700 flex flex-col">
@@ -46,19 +46,19 @@ export default function DevicePalette() {
                     デバイス
                 </button>
                 <button
-                    onClick={() => setActiveTab('hints')}
-                    className={`flex-1 py-3 text-xs font-bold text-center transition-colors ${activeTab === 'hints'
+                    onClick={() => setActiveTab('memo')}
+                    className={`flex-1 py-3 text-xs font-bold text-center transition-colors ${activeTab === 'memo'
                         ? 'text-blue-400 border-b-2 border-blue-400 bg-slate-800'
                         : 'text-slate-400 hover:text-white hover:bg-slate-800'
                         }`}
                 >
-                    解説
+                    メモ
                 </button>
             </div>
 
-            <div className="flex-1 p-4 overflow-y-auto">
+            <div className="flex-1 overflow-y-auto">
                 {activeTab === 'devices' ? (
-                    <div className="flex flex-col gap-4">
+                    <div className="flex flex-col gap-4 p-4">
                         <p className="text-xs text-slate-400 mb-2 text-center">
                             ドラッグ＆ドロップで配置
                         </p>
@@ -85,39 +85,14 @@ export default function DevicePalette() {
                         />
                     </div>
                 ) : (
-                    <div className="flex flex-col gap-6 text-slate-300">
-                        <div>
-                            <h3 className="text-sm font-bold text-white mb-2 flex items-center gap-2">
-                                💡 操作解説
-                            </h3>
-                            <ul className="text-xs space-y-2 list-disc list-inside text-slate-400">
-                                <li>ノード間をドラッグして接続</li>
-                                <li>PCはダブルクリックで設定</li>
-                                <li>デバイスをクリックで詳細表示</li>
-                                <li>Export JSONでやりかけの内容を保存できます(Chrome非対応)</li>
-                                <li>Import JSONで保存した内容を開くことができます</li>
-                            </ul>
-                        </div>
-
-                        <div>
-                            <h3 className="text-sm font-bold text-white mb-2 flex items-center gap-2">
-                                ⌨️ ターミナル操作
-                            </h3>
-                            <ul className="text-xs space-y-2 text-slate-400">
-                                <li className="flex items-center gap-2">
-                                    <kbd className="bg-slate-700 px-1.5 py-0.5 rounded text-white font-mono">Tab</kbd>
-                                    <span>コマンド補完</span>
-                                </li>
-                                <li className="flex items-center gap-2">
-                                    <kbd className="bg-slate-700 px-1.5 py-0.5 rounded text-white font-mono">?</kbd>
-                                    <span>ヘルプ表示</span>
-                                </li>
-                                <li className="flex items-center gap-2">
-                                    <kbd className="bg-slate-700 px-1.5 py-0.5 rounded text-white font-mono">↑↓</kbd>
-                                    <span>コマンド履歴</span>
-                                </li>
-                            </ul>
-                        </div>
+                    <div className="flex flex-col h-full bg-slate-800">
+                        <textarea
+                            value={note}
+                            onChange={(e) => setNote(e.target.value)}
+                            placeholder="ここにメモを入力できます。&#13;&#10;内容はJSONに保存されます。"
+                            className="flex-1 w-full bg-slate-900 text-slate-300 p-3 text-xs resize-none focus:outline-none focus:ring-1 focus:ring-blue-500 border-none"
+                            style={{ lineHeight: '1.5' }}
+                        />
                     </div>
                 )}
             </div>

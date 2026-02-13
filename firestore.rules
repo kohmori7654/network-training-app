@@ -3,16 +3,15 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     match /templates/{templateId} {
-      // 誰でも公式テンプレートは読み取れる
-      // 自分のテンプレートは読み取れる
-      allow read: if resource.data.isOfficial == true || resource.data.authorId == request.auth.uid;
+      // 全員（非ログインユーザー含む）がテンプレートを読み取れる
+      allow read: if true;
 
       // 認証済みユーザーは自分のテンプレートを作成・更新できる
       allow create: if request.auth != null && request.resource.data.authorId == request.auth.uid;
       allow update: if request.auth != null && request.resource.data.authorId == request.auth.uid;
 
       // 自分のテンプレートは削除できる
-      allow delete: if resource.data.authorId == request.auth.uid;
+      allow delete: if request.auth != null && resource.data.authorId == request.auth.uid;
     }
   }
 }
