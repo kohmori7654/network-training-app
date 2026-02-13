@@ -12,6 +12,7 @@ import { useTemplateStore } from '@/features/templates/useTemplateStore';
 import { ModeSwitcher } from '@/features/templates/ModeSwitcher';
 import { TemplateDashboard } from '@/features/templates/TemplateDashboard';
 import { SaveTemplateModal } from '@/features/templates/SaveTemplateModal';
+import CopyJsonFallbackModal from '@/components/CopyJsonFallbackModal';
 import { Save } from 'lucide-react';
 
 // React Flowはクライアントサイドのみでレンダリング
@@ -42,6 +43,9 @@ export default function MainLayout() {
     // Template Mode State
     const { currentMode, isMockAuthEnabled, subscribeToTemplates } = useTemplateStore();
     const [isSaveModalOpen, setIsSaveModalOpen] = useState(false);
+
+    // Copy JSON 失敗時のフォールバック（埋め込み iframe でクリップボード API が使えない場合）
+    const [copyFallbackJson, setCopyFallbackJson] = useState<string | null>(null);
 
     // Subscribe to templates for real-time updates
     useEffect(() => {
@@ -167,7 +171,8 @@ export default function MainLayout() {
             if (ok) {
                 alert('クリップボードにコピーしました');
             } else {
-                alert('コピーに失敗しました。ブラウザの権限またはポップアップを許可してください。');
+                // 埋め込み iframe ではクリップボード API が制限されるため、フォールバックモーダルを表示
+                setCopyFallbackJson(json);
             }
         });
     }, [exportToJson, copyToClipboard]);
@@ -343,6 +348,14 @@ export default function MainLayout() {
             {/* テンプレート保存モーダル */}
             {isSaveModalOpen && (
                 <SaveTemplateModal onClose={() => setIsSaveModalOpen(false)} />
+            )}
+
+            {/* Copy JSON 失敗時のフォールバックモーダル（埋め込み iframe 用） */}
+            {copyFallbackJson && (
+                <CopyJsonFallbackModal
+                    json={copyFallbackJson}
+                    onClose={() => setCopyFallbackJson(null)}
+                />
             )}
 
             {/* リサイズ中のオーバーレイ（操作感をスムーズにするため） */}
