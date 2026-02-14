@@ -1,6 +1,7 @@
 
 export interface NetworkTemplate {
     id: string;
+    slug: string;        // URL-safe identifier (fixed at creation, never changes)
     name: string;
     description: string;
     isOfficial: boolean;

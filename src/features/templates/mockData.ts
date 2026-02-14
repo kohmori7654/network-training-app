@@ -5,6 +5,7 @@ import { NetworkTemplate } from './types';
 export const OFFICIAL_TEMPLATES: NetworkTemplate[] = [
     {
         id: 'tmpl-official-001',
+        slug: 'basic-star-topology',
         name: '基本スター型トポロジ',
         description: 'L2スイッチ1台を中心に、2台のPCを接続したシンプルなネットワーク構成です。',
         isOfficial: true,

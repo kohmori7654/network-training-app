@@ -44,7 +44,7 @@ export default function MainLayout() {
     const [isTerminalFullScreen, setIsTerminalFullScreen] = useState(false);
 
     // Template Mode State
-    const { currentMode, isMockAuthEnabled, subscribeToTemplates } = useTemplateStore();
+    const { currentMode, isMockAuthEnabled, subscribeToTemplates, findTemplateBySlug } = useTemplateStore();
     const [isSaveModalOpen, setIsSaveModalOpen] = useState(false);
 
     // Copy JSON 結果表示用モーダル
@@ -55,6 +55,26 @@ export default function MainLayout() {
         const unsubscribe = subscribeToTemplates();
         return () => unsubscribe();
     }, [subscribeToTemplates]);
+
+    // URL parameter: ?template=<slug> でテンプレートを自動ロード
+    const setMode = useTemplateStore((s) => s.setMode);
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+        const params = new URLSearchParams(window.location.search);
+        const templateSlug = params.get('template');
+        if (!templateSlug) return;
+
+        const template = findTemplateBySlug(templateSlug);
+        if (template) {
+            importFromJson(template.data);
+            setMode('free');
+        }
+
+        // URLからパラメータを除去
+        const url = new URL(window.location.href);
+        url.searchParams.delete('template');
+        window.history.replaceState({}, '', url.pathname + url.search);
+    }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
     // リサイズ用Ref
     const sidebarRef = useRef<HTMLDivElement>(null);

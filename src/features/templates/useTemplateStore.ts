@@ -30,6 +30,9 @@ interface TemplateStoreState {
     loadUserTemplates: () => void;
     saveUserTemplate: (template: NetworkTemplate) => Promise<void>;
     deleteUserTemplate: (templateId: string) => Promise<void>;
+
+    // Helpers
+    findTemplateBySlug: (slug: string) => NetworkTemplate | undefined;
 }
 
 // --- Mock User ---
@@ -149,6 +152,12 @@ export const useTemplateStore = create<TemplateStoreState>()(
                 } catch (e) {
                     console.error("Error deleting document: ", e);
                 }
+            },
+
+            // Helpers
+            findTemplateBySlug: (slug: string) => {
+                const all = [...get().officialTemplates, ...get().userTemplates];
+                return all.find(t => t.slug === slug);
             }
         }),
         {
